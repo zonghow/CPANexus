@@ -112,26 +112,101 @@ The compose file starts:
 
 The SQLite database is stored in the named volume `cpa-nexus-data`.
 
+## Server Deployment with Docker Compose
+
+For a server deployment, build the image on your local machine or CI and let the
+server only pull and run the published image.
+
+Create a deployment directory on the server:
+
+```bash
+mkdir -p ~/cpa-nexus
+cd ~/cpa-nexus
+```
+
+Create `config.toml`:
+
+```toml
+[auth]
+admin_password = "change-me"
+cookie_name = "cpa_nexus_session"
+session_max_age_days = 7
+```
+
+Create `docker-compose.yml`:
+
+```yaml
+services:
+  web:
+    image: ${CPA_NEXUS_IMAGE:-zonghao/cpa-nexus:0.1.0-amd64}
+    command: npm run start
+    environment:
+      DATABASE_URL: file:/app/data/cpa-nexus.db
+      CPA_NEXUS_CONFIG: /app/config.toml
+      PORT: 3000
+    ports:
+      - "127.0.0.1:9527:3000"
+    volumes:
+      - cpa-nexus-data:/app/data
+      - ./config.toml:/app/config.toml:ro
+    restart: unless-stopped
+
+  worker:
+    image: ${CPA_NEXUS_IMAGE:-zonghao/cpa-nexus:0.1.0-amd64}
+    command: npm run worker
+    environment:
+      DATABASE_URL: file:/app/data/cpa-nexus.db
+      CPA_NEXUS_CONFIG: /app/config.toml
+    volumes:
+      - cpa-nexus-data:/app/data
+      - ./config.toml:/app/config.toml:ro
+    restart: unless-stopped
+    depends_on:
+      - web
+
+volumes:
+  cpa-nexus-data:
+```
+
+Start or upgrade the service:
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+Check status and logs:
+
+```bash
+docker compose ps
+docker compose logs -f --tail=100
+```
+
+The example binds the app to `127.0.0.1:9527` so it can sit behind Nginx,
+Caddy, Traefik, or another reverse proxy. If you want to expose it directly,
+change the port mapping to `"9527:3000"`.
+
 ## Docker Hub Image
 
 The current versioned image is:
 
 ```bash
-zonghao/cpa-nexus:0.1.0
+zonghao/cpa-nexus:0.1.0-amd64
 ```
 
 Use a specific image with Docker Compose:
 
 ```bash
-CPA_NEXUS_IMAGE=zonghao/cpa-nexus:0.1.0 docker compose pull
-CPA_NEXUS_IMAGE=zonghao/cpa-nexus:0.1.0 docker compose up -d
+CPA_NEXUS_IMAGE=zonghao/cpa-nexus:0.1.0-amd64 docker compose pull
+CPA_NEXUS_IMAGE=zonghao/cpa-nexus:0.1.0-amd64 docker compose up -d
 ```
 
-Build and push a new version:
+Build and push a new Linux amd64 image from your local machine:
 
 ```bash
-CPA_NEXUS_IMAGE=zonghao/cpa-nexus:0.1.0 docker compose build
-docker push zonghao/cpa-nexus:0.1.0
+docker buildx build --platform linux/amd64 \
+  -t zonghao/cpa-nexus:0.1.0-amd64 \
+  --push .
 ```
 
 ## CPA Integration
