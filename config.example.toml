@@ -1,0 +1,4 @@
+[auth]
+admin_password = "admin"
+cookie_name = "cpa_nexus_session"
+session_max_age_days = 7

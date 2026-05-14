@@ -1,0 +1,32 @@
+services:
+  web:
+    image: ${CPA_NEXUS_IMAGE:-cpa-nexus:latest}
+    build: .
+    command: npm run start
+    environment:
+      DATABASE_URL: file:/app/data/cpa-nexus.db
+      CPA_NEXUS_CONFIG: /app/config.toml
+      PORT: 3000
+    ports:
+      - "3000:3000"
+    volumes:
+      - cpa-nexus-data:/app/data
+      - ./config.toml:/app/config.toml:ro
+    restart: unless-stopped
+
+  worker:
+    image: ${CPA_NEXUS_IMAGE:-cpa-nexus:latest}
+    build: .
+    command: npm run worker
+    environment:
+      DATABASE_URL: file:/app/data/cpa-nexus.db
+      CPA_NEXUS_CONFIG: /app/config.toml
+    volumes:
+      - cpa-nexus-data:/app/data
+      - ./config.toml:/app/config.toml:ro
+    restart: unless-stopped
+    depends_on:
+      - web
+
+volumes:
+  cpa-nexus-data:

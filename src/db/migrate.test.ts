@@ -1,0 +1,58 @@
+import Database from "better-sqlite3";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const originalDatabaseUrl = process.env.DATABASE_URL;
+let tempDir: string;
+
+function globalDb() {
+  return globalThis as unknown as {
+    cpaNexusSqlite?: Database.Database;
+  };
+}
+
+describe("migrate", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    tempDir = mkdtempSync(join(tmpdir(), "cpa-nexus-migrate-"));
+    process.env.DATABASE_URL = `file:${join(tempDir, "test.db")}`;
+    delete globalDb().cpaNexusSqlite;
+  });
+
+  afterEach(() => {
+    globalDb().cpaNexusSqlite?.close();
+    delete globalDb().cpaNexusSqlite;
+    process.env.DATABASE_URL = originalDatabaseUrl;
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("backfills proxy_url from downloaded auth raw_json", async () => {
+    const { migrate } = await import("./migrate");
+    const { getSqlite } = await import("./client");
+
+    migrate();
+    const sqlite = getSqlite();
+    const proxyUrl = "socks5://proxy-user:proxy-pass@127.0.0.1:1080/";
+    const cpaInstanceId = sqlite
+      .prepare(`
+        INSERT INTO cpa_instances (name, base_url, password)
+        VALUES ('target', 'https://target.example.com', 'secret')
+      `)
+      .run().lastInsertRowid;
+
+    sqlite
+      .prepare(`
+        INSERT INTO auth_files (cpa_instance_id, file_name, email, proxy_url, raw_json)
+        VALUES (?, 'target.json', 'target@example.com', NULL, ?)
+      `)
+      .run(cpaInstanceId, JSON.stringify({ email: "target@example.com", proxy_url: proxyUrl }));
+
+    migrate();
+
+    expect(
+      sqlite.prepare("SELECT proxy_url FROM auth_files WHERE file_name = 'target.json'").get(),
+    ).toEqual({ proxy_url: proxyUrl });
+  });
+});
