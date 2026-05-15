@@ -52,6 +52,21 @@ export function migrate() {
       captured_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
 
+    CREATE TABLE IF NOT EXISTS dashboard_metric_snapshots (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      cpa_instance_id INTEGER NOT NULL REFERENCES cpa_instances(id) ON DELETE CASCADE,
+      account_count INTEGER NOT NULL DEFAULT 0,
+      available_account_count INTEGER NOT NULL DEFAULT 0,
+      average_5h_remaining_percent REAL,
+      average_week_remaining_percent REAL,
+      proxy_count INTEGER NOT NULL DEFAULT 0,
+      captured_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS dashboard_metric_snapshots_cpa_time_idx
+      ON dashboard_metric_snapshots(cpa_instance_id, captured_at);
+    CREATE INDEX IF NOT EXISTS dashboard_metric_snapshots_time_idx
+      ON dashboard_metric_snapshots(captured_at);
+
     CREATE TABLE IF NOT EXISTS replenishment_strategies (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       cpa_instance_id INTEGER NOT NULL REFERENCES cpa_instances(id) ON DELETE CASCADE,

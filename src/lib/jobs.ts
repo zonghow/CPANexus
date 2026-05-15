@@ -6,6 +6,7 @@ import {
   backupAccounts,
   cpaInstances,
   cronJobs,
+  dashboardMetricSnapshots,
   jobRuns,
   proxies,
   proxyCpaInstances,
@@ -17,6 +18,7 @@ import {
   type CpaInstance,
 } from "@/db/schema";
 
+import { buildDashboardMetricSnapshot } from "./data-board";
 import {
   downloadRemoteAuthFile,
   listRemoteAuthFiles,
@@ -117,6 +119,7 @@ async function syncCpaInstance(instance: CpaInstance): Promise<CpaInstanceSyncRe
     const remoteFiles = await listRemoteAuthFiles(instance);
     await syncAuthFilesForInstance(instance, remoteFiles);
     const quotaResult = await syncQuotasForInstance(instance, remoteFiles);
+    recordDashboardMetricSnapshot(instance.id, nowIso());
 
     db.update(cpaInstances)
       .set({
@@ -601,6 +604,44 @@ async function syncQuotasForInstance(instance: CpaInstance, remoteFiles?: Remote
   }
 
   return snapshots.length;
+}
+
+function recordDashboardMetricSnapshot(cpaInstanceId: number, capturedAt: string) {
+  const snapshot = buildDashboardMetricSnapshot(
+    {
+      cpaInstances: db
+        .select()
+        .from(cpaInstances)
+        .where(eq(cpaInstances.id, cpaInstanceId))
+        .all(),
+      authFiles: db
+        .select()
+        .from(authFiles)
+        .where(eq(authFiles.cpaInstanceId, cpaInstanceId))
+        .all(),
+      quotaSnapshots: db
+        .select()
+        .from(quotaSnapshots)
+        .where(eq(quotaSnapshots.cpaInstanceId, cpaInstanceId))
+        .all(),
+      proxies: db.select().from(proxies).all(),
+      proxyCpaInstances: db
+        .select()
+        .from(proxyCpaInstances)
+        .where(eq(proxyCpaInstances.cpaInstanceId, cpaInstanceId))
+        .all(),
+    },
+    cpaInstanceId,
+    capturedAt,
+  );
+
+  if (!snapshot) {
+    return;
+  }
+
+  db.insert(dashboardMetricSnapshots)
+    .values(snapshot)
+    .run();
 }
 
 function updateAuthFileAvailabilityFromQuota(

@@ -169,6 +169,78 @@ describe("autoReplenish", () => {
         .get(cpaInstanceId, "proxy-user@example.com"),
     ).toEqual({ proxy_url: proxyUrl });
   });
+
+  it("records a dashboard metric snapshot after syncing quotas", async () => {
+    const sqlite = await setupSqlite();
+    const cpaInstanceId = insertInstance(sqlite);
+    sqlite
+      .prepare(`
+        INSERT INTO proxies (id, name, url, enabled)
+        VALUES (1, 'proxy-a', 'http://proxy-a.example.com', 1)
+      `)
+      .run();
+    sqlite
+      .prepare(`
+        INSERT INTO proxy_cpa_instances (proxy_id, cpa_instance_id)
+        VALUES (1, ?)
+      `)
+      .run(cpaInstanceId);
+
+    const cpaClient = await import("@/lib/cpa-client");
+    vi.mocked(cpaClient.listRemoteAuthFiles).mockResolvedValue([
+      { name: "a.json", email: "a@example.com", type: "codex" },
+      { name: "b.json", email: "b@example.com", type: "codex" },
+    ]);
+    vi.mocked(cpaClient.downloadRemoteAuthFile).mockRejectedValue(new Error("download skipped"));
+    vi.mocked(cpaClient.refreshRemoteQuotas).mockResolvedValue([
+      {
+        authFileName: "a.json",
+        email: "a@example.com",
+        usage5hPercent: 20,
+        usageWeekPercent: 40,
+        available: true,
+        exception: null,
+        raw: { email: "a@example.com" },
+      },
+      {
+        authFileName: "b.json",
+        email: "b@example.com",
+        usage5hPercent: 60,
+        usageWeekPercent: 80,
+        available: false,
+        exception: "refresh failed",
+        raw: { email: "b@example.com" },
+      },
+    ]);
+    const jobs = await import("./jobs");
+
+    const result = await jobs.syncCpaInstances();
+
+    expect(result).toMatchObject({ status: "success" });
+    expect(
+      sqlite
+        .prepare(`
+          SELECT
+            cpa_instance_id,
+            account_count,
+            available_account_count,
+            average_5h_remaining_percent,
+            average_week_remaining_percent,
+            proxy_count
+          FROM dashboard_metric_snapshots
+        `)
+        .all(),
+    ).toEqual([
+      {
+        cpa_instance_id: cpaInstanceId,
+        account_count: 2,
+        available_account_count: 1,
+        average_5h_remaining_percent: 60,
+        average_week_remaining_percent: 40,
+        proxy_count: 1,
+      },
+    ]);
+  });
 });
 
 describe("refreshAuthFileQuotaById", () => {

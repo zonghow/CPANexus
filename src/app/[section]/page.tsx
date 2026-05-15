@@ -6,6 +6,7 @@ import { LoginPage } from "@/components/login-page";
 import { isAuthenticatedCookieHeader } from "@/lib/auth";
 
 const sections = new Set<SectionId>([
+  "dashboard",
   "instances",
   "auth",
   "strategies",

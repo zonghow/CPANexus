@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import {
+  index,
   integer,
   primaryKey,
   real,
@@ -66,6 +67,29 @@ export const quotaSnapshots = sqliteTable("quota_snapshots", {
   rawJson: text("raw_json"),
   capturedAt: text("captured_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 });
+
+export const dashboardMetricSnapshots = sqliteTable(
+  "dashboard_metric_snapshots",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    cpaInstanceId: integer("cpa_instance_id")
+      .notNull()
+      .references(() => cpaInstances.id, { onDelete: "cascade" }),
+    accountCount: integer("account_count").notNull().default(0),
+    availableAccountCount: integer("available_account_count").notNull().default(0),
+    average5hRemainingPercent: real("average_5h_remaining_percent"),
+    averageWeekRemainingPercent: real("average_week_remaining_percent"),
+    proxyCount: integer("proxy_count").notNull().default(0),
+    capturedAt: text("captured_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    index("dashboard_metric_snapshots_cpa_time_idx").on(
+      table.cpaInstanceId,
+      table.capturedAt,
+    ),
+    index("dashboard_metric_snapshots_time_idx").on(table.capturedAt),
+  ],
+);
 
 export const replenishmentStrategies = sqliteTable(
   "replenishment_strategies",
@@ -187,6 +211,7 @@ export type NewCpaInstance = typeof cpaInstances.$inferInsert;
 export type AuthFile = typeof authFiles.$inferSelect;
 export type BackupAccount = typeof backupAccounts.$inferSelect;
 export type CronJob = typeof cronJobs.$inferSelect;
+export type DashboardMetricSnapshot = typeof dashboardMetricSnapshots.$inferSelect;
 export type Proxy = typeof proxies.$inferSelect;
 export type ReplenishmentRecord = typeof replenishmentRecords.$inferSelect;
 export type ReplenishmentStrategy = typeof replenishmentStrategies.$inferSelect;

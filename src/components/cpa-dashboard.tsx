@@ -2,6 +2,7 @@
 
 import {
   Activity,
+  BarChart3,
   Copy,
   Database,
   ExternalLink,
@@ -56,6 +57,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
+import { DataBoardSection } from "@/components/data-board-section";
 import { resolveAccountQuotaStatus, type AccountQuotaState } from "@/lib/account-quota-status";
 import { sortAccountRows } from "@/lib/account-sort";
 import { onlyEnabledCpaGroups } from "@/lib/cpa-groups";
@@ -198,23 +200,10 @@ type CodexOAuthStartResult = {
   state: string | null;
 };
 
-type DashboardData = {
-  stats: {
-    totalInstances: number;
-    instances: number;
-    enabledInstances: number;
-    authFiles: number;
-    availableAuthFiles: number;
-    idleBackupAccounts: number;
-    proxies: number;
-    average5hRemainingPercent: number | null;
-    averageWeekRemainingPercent: number | null;
-  };
-};
-
 const navItems = [
-  { id: "instances", label: "CPA管理", icon: Server, href: "/instances" },
   { id: "auth", label: "账号管理", icon: FileKey2, href: "/auth" },
+  { id: "dashboard", label: "数据看板", icon: BarChart3, href: "/dashboard" },
+  { id: "instances", label: "CPA管理", icon: Server, href: "/instances" },
   { id: "strategies", label: "自动补号", icon: ListChecks, href: "/strategies" },
   { id: "replenishment-records", label: "补号记录", icon: History, href: "/replenishment-records" },
   { id: "proxies", label: "代理管理", icon: Network, href: "/proxies" },
@@ -272,7 +261,6 @@ const emptyProxy = {
 
 export function CpaDashboard({ section = "instances" }: { section?: SectionId }) {
   const activeSection = section;
-  const [dashboard, setDashboard] = useState<DashboardData["stats"] | null>(null);
   const [instances, setInstances] = useState<CpaInstance[]>([]);
   const [authGroups, setAuthGroups] = useState<Array<{ instance: CpaInstance; authFiles: AuthFile[] }>>([]);
   const [quotaGroups, setQuotaGroups] = useState<Array<{ instance: CpaInstance; quotas: QuotaSnapshot[] }>>([]);
@@ -288,6 +276,7 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
   const [proxyChecks, setProxyChecks] = useState<Record<number, ProxyCheckResult>>({});
   const [checkingProxies, setCheckingProxies] = useState(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
+  const [dataRefreshVersion, setDataRefreshVersion] = useState(0);
   const [instanceForm, setInstanceForm] = useState(emptyInstance);
   const [editingInstanceId, setEditingInstanceId] = useState<number | null>(null);
   const [instanceDialogOpen, setInstanceDialogOpen] = useState(false);
@@ -300,9 +289,8 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
 
   async function loadAll() {
     try {
-      const [dashboardRes, instanceRes, authRes, quotaRes, strategyRes, recordRes, proxyRes, backupRes, jobRes] =
+      const [instanceRes, authRes, quotaRes, strategyRes, recordRes, proxyRes, backupRes, jobRes] =
         await Promise.all([
-          fetchJson<{ stats: DashboardData["stats"] }>("/api/dashboard"),
           fetchJson<{ instances: CpaInstance[] }>("/api/cpa-instances"),
           fetchJson<{ groups: Array<{ instance: CpaInstance; authFiles: AuthFile[] }> }>("/api/auth-files"),
           fetchJson<{ groups: Array<{ instance: CpaInstance; quotas: QuotaSnapshot[] }> }>("/api/quotas"),
@@ -312,7 +300,6 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
           fetchJson<{ accounts: BackupAccount[] }>("/api/backup-accounts"),
           fetchJson<{ jobs: CronJob[]; runs: JobRun[] }>("/api/jobs"),
         ]);
-      setDashboard(dashboardRes.stats);
       setInstances(instanceRes.instances);
       setAuthGroups(authRes.groups);
       setQuotaGroups(quotaRes.groups);
@@ -322,6 +309,7 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
       setBackupAccounts(backupRes.accounts);
       setJobs(jobRes.jobs);
       setRuns(jobRes.runs);
+      setDataRefreshVersion((version) => version + 1);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
     }
@@ -340,12 +328,6 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
     return () => window.clearInterval(timer);
   }, []);
 
-  const availableRate = useMemo(() => {
-    if (!dashboard?.authFiles) {
-      return 0;
-    }
-    return Math.round((dashboard.availableAuthFiles / dashboard.authFiles) * 100);
-  }, [dashboard]);
   const syncJob = useMemo(
     () => jobs.find((job) => job.key === "sync-cpa-instances") ?? null,
     [jobs],
@@ -808,10 +790,12 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
               </div>
             ) : null}
 
+            {activeSection === "dashboard" ? (
+              <DataBoardSection refreshVersion={dataRefreshVersion} />
+            ) : null}
+
             {activeSection === "instances" ? (
               <InstancesSection
-                stats={dashboard}
-                availableRate={availableRate}
                 instances={instances}
                 form={instanceForm}
                 editingId={editingInstanceId}
@@ -981,8 +965,6 @@ function formatSyncButtonTitle(
 }
 
 function InstancesSection(props: {
-  stats: DashboardData["stats"] | null;
-  availableRate: number;
   instances: CpaInstance[];
   form: typeof emptyInstance;
   editingId: number | null;
@@ -994,20 +976,9 @@ function InstancesSection(props: {
   onToggleEnabled: (id: number, enabled: boolean) => Promise<void>;
   onDelete: (id: number) => Promise<void>;
 }) {
-  const stats = props.stats;
   const formId = "cpa-instance-form";
   return (
     <section className="space-y-5">
-      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4 2xl:grid-cols-7">
-        <StatCard label="CPA实例" value={stats?.instances ?? 0} sub={`${stats?.totalInstances ?? 0} 总数`} />
-        <StatCard label="账号" value={stats?.authFiles ?? 0} sub={`${stats?.availableAuthFiles ?? 0} 可用`} />
-        <StatCard label="可用率" value={`${props.availableRate}%`} sub="auth文件" tone="emerald" />
-        <StatCard label="5h剩余" value={formatPercent(stats?.average5hRemainingPercent ?? null)} sub="启用CPA均值" tone="sky" />
-        <StatCard label="周剩余" value={formatPercent(stats?.averageWeekRemainingPercent ?? null)} sub="启用CPA均值" tone="emerald" />
-        <StatCard label="替补账号" value={stats?.idleBackupAccounts ?? 0} sub="无归属" tone="amber" />
-        <StatCard label="代理" value={stats?.proxies ?? 0} sub="已配置" tone="sky" />
-      </div>
-
       <div className="flex flex-col gap-3 rounded-md border bg-card p-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <div className="font-medium">CPA 实例</div>
@@ -3070,24 +3041,6 @@ function BackupAccountsSection(props: {
         ])}
       />
     </section>
-  );
-}
-
-function StatCard({ label, value, sub, tone = "slate" }: { label: string; value: string | number; sub: string; tone?: "slate" | "emerald" | "amber" | "sky" }) {
-  const toneClass = {
-    slate: "bg-slate-100 text-slate-800",
-    emerald: "bg-emerald-100 text-emerald-800",
-    amber: "bg-amber-100 text-amber-900",
-    sky: "bg-sky-100 text-sky-800",
-  }[tone];
-  return (
-    <div className="rounded-md border bg-card p-4">
-      <div className="text-sm text-muted-foreground">{label}</div>
-      <div className="mt-2 flex items-end justify-between">
-        <div className="text-2xl font-semibold">{value}</div>
-        <span className={cn("rounded px-2 py-1 text-xs", toneClass)}>{sub}</span>
-      </div>
-    </div>
   );
 }
 

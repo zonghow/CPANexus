@@ -55,4 +55,36 @@ describe("migrate", () => {
       sqlite.prepare("SELECT proxy_url FROM auth_files WHERE file_name = 'target.json'").get(),
     ).toEqual({ proxy_url: proxyUrl });
   });
+
+  it("creates dashboard metric snapshot storage", async () => {
+    const { migrate } = await import("./migrate");
+    const { getSqlite } = await import("./client");
+
+    migrate();
+    const sqlite = getSqlite();
+
+    const columns = sqlite
+      .prepare("PRAGMA table_info(dashboard_metric_snapshots)")
+      .all() as Array<{ name: string }>;
+    expect(columns.map((column) => column.name)).toEqual([
+      "id",
+      "cpa_instance_id",
+      "account_count",
+      "available_account_count",
+      "average_5h_remaining_percent",
+      "average_week_remaining_percent",
+      "proxy_count",
+      "captured_at",
+    ]);
+
+    const indexes = sqlite
+      .prepare("PRAGMA index_list(dashboard_metric_snapshots)")
+      .all() as Array<{ name: string }>;
+    expect(indexes.map((index) => index.name)).toEqual(
+      expect.arrayContaining([
+        "dashboard_metric_snapshots_cpa_time_idx",
+        "dashboard_metric_snapshots_time_idx",
+      ]),
+    );
+  });
 });
