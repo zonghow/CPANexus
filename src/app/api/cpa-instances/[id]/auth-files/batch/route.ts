@@ -1,7 +1,7 @@
-import { and, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 
 import { db } from "@/db/client";
-import { authFiles, backupAccounts, cpaInstances, proxies, proxyCpaInstances, quotaSnapshots } from "@/db/schema";
+import { authFiles, cpaInstances, proxies, proxyCpaInstances, quotaSnapshots } from "@/db/schema";
 import {
   badRequest,
   initRequestDb,
@@ -22,10 +22,12 @@ import {
   syncCpaInstanceById,
   type CpaInstanceSyncResult,
 } from "@/lib/jobs";
+import { extractSubscriptionType, isFreeSubscriptionType } from "@/lib/subscription";
 
 export const runtime = "nodejs";
 
 type BatchAction = "delete" | "disable" | "autoAssignProxy";
+type BatchTarget = "selected" | "free";
 
 export async function POST(
   request: Request,
@@ -43,9 +45,12 @@ export async function POST(
       return badRequest("CPA instance id is required");
     }
 
-    const body = await readJson<{ action?: BatchAction; authFileIds?: number[] }>(request);
+    const body = await readJson<{ action?: BatchAction; authFileIds?: number[]; target?: BatchTarget }>(request);
     if (body.action !== "delete" && body.action !== "disable" && body.action !== "autoAssignProxy") {
       return badRequest("action must be delete, disable, or autoAssignProxy");
+    }
+    if (body.target !== undefined && body.target !== "selected" && body.target !== "free") {
+      return badRequest("target must be selected or free");
     }
 
     const instance = db
@@ -67,21 +72,13 @@ export async function POST(
       });
     }
 
-    const authFileIds = Array.isArray(body.authFileIds)
-      ? [...new Set(body.authFileIds.filter((id) => Number.isInteger(id) && id > 0))]
-      : [];
-    if (authFileIds.length === 0) {
-      return badRequest("authFileIds is required");
-    }
-
-    const rows = db
-      .select()
-      .from(authFiles)
-      .where(and(eq(authFiles.cpaInstanceId, cpaInstanceId), inArray(authFiles.id, authFileIds)))
-      .orderBy(authFiles.id)
-      .all();
-    if (rows.length !== authFileIds.length) {
-      return badRequest("some auth files do not belong to this CPA instance");
+    const target = body.target ?? "selected";
+    const rows =
+      target === "free"
+        ? loadFreeAuthFiles(cpaInstanceId, body.action === "delete")
+        : loadSelectedAuthFiles(cpaInstanceId, body.authFileIds);
+    if (rows instanceof Response) {
+      return rows;
     }
 
     const updatedAt = new Date().toISOString();
@@ -89,7 +86,6 @@ export async function POST(
       if (body.action === "delete") {
         await deleteRemoteAuthFile(instance, authFile.fileName);
         deleteLocalAuthFile(cpaInstanceId, authFile.id, authFile.fileName);
-        clearBackupAssignment(cpaInstanceId, authFile.fileName);
       } else {
         await setRemoteAuthFileDisabled(instance, authFile.fileName, true);
         db.update(authFiles)
@@ -97,7 +93,7 @@ export async function POST(
             disabled: true,
             available: false,
             status: "已停用",
-            statusMessage: "批量停用异常账号",
+            statusMessage: target === "free" ? "批量停用Free号" : "批量停用异常账号",
             lastSyncedAt: updatedAt,
           })
           .where(eq(authFiles.id, authFile.id))
@@ -115,6 +111,69 @@ export async function POST(
   }
 }
 
+function loadSelectedAuthFiles(cpaInstanceId: number, authFileIds: number[] | undefined) {
+  const selectedIds = Array.isArray(authFileIds)
+    ? [...new Set(authFileIds.filter((id) => Number.isInteger(id) && id > 0))]
+    : [];
+  if (selectedIds.length === 0) {
+    return badRequest("authFileIds is required");
+  }
+
+  const rows = db
+    .select()
+    .from(authFiles)
+    .where(and(eq(authFiles.cpaInstanceId, cpaInstanceId), inArray(authFiles.id, selectedIds)))
+    .orderBy(authFiles.id)
+    .all();
+  if (rows.length !== selectedIds.length) {
+    return badRequest("some auth files do not belong to this CPA instance");
+  }
+
+  return rows;
+}
+
+function loadFreeAuthFiles(cpaInstanceId: number, includeDisabled: boolean) {
+  const rows = db
+    .select()
+    .from(authFiles)
+    .where(eq(authFiles.cpaInstanceId, cpaInstanceId))
+    .orderBy(authFiles.id)
+    .all();
+  if (rows.length === 0) {
+    return rows;
+  }
+
+  const quotaByFileName = new Map<string, typeof quotaSnapshots.$inferSelect>();
+  const quotaByEmail = new Map<string, typeof quotaSnapshots.$inferSelect>();
+  const quotaRows = db
+    .select()
+    .from(quotaSnapshots)
+    .where(eq(quotaSnapshots.cpaInstanceId, cpaInstanceId))
+    .orderBy(desc(quotaSnapshots.capturedAt), desc(quotaSnapshots.id))
+    .all();
+  for (const quota of quotaRows) {
+    if (quota.authFileName && !quotaByFileName.has(quota.authFileName)) {
+      quotaByFileName.set(quota.authFileName, quota);
+    }
+    if (quota.email) {
+      const email = quota.email.toLowerCase();
+      if (!quotaByEmail.has(email)) {
+        quotaByEmail.set(email, quota);
+      }
+    }
+  }
+
+  return rows.filter((authFile) => {
+    if (!includeDisabled && authFile.disabled) {
+      return false;
+    }
+    const quota =
+      quotaByFileName.get(authFile.fileName) ??
+      (authFile.email ? quotaByEmail.get(authFile.email.toLowerCase()) : undefined);
+    return isFreeSubscriptionType(extractSubscriptionType(quota?.rawJson ?? null));
+  });
+}
+
 function deleteLocalAuthFile(cpaInstanceId: number, authFileId: number, fileName: string) {
   db.delete(quotaSnapshots)
     .where(
@@ -125,25 +184,6 @@ function deleteLocalAuthFile(cpaInstanceId: number, authFileId: number, fileName
     )
     .run();
   db.delete(authFiles).where(eq(authFiles.id, authFileId)).run();
-}
-
-function clearBackupAssignment(cpaInstanceId: number, fileName: string) {
-  const now = new Date().toISOString();
-  db.update(backupAccounts)
-    .set({
-      status: "idle",
-      assignedCpaInstanceId: null,
-      assignedAuthFileName: null,
-      assignedAt: null,
-      lastCheckedAt: now,
-    })
-    .where(
-      and(
-        eq(backupAccounts.assignedCpaInstanceId, cpaInstanceId),
-        eq(backupAccounts.assignedAuthFileName, fileName),
-      ),
-    )
-    .run();
 }
 
 async function autoAssignProxy(instance: typeof cpaInstances.$inferSelect) {

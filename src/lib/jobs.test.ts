@@ -15,7 +15,7 @@ vi.mock("@/lib/cpa-client", () => ({
 const originalDatabaseUrl = process.env.DATABASE_URL;
 let tempDir: string | null = null;
 
-describe("autoReplenish", () => {
+describe("sync jobs", () => {
   beforeEach(() => {
     vi.resetModules();
     vi.clearAllMocks();
@@ -34,105 +34,22 @@ describe("autoReplenish", () => {
     process.env.DATABASE_URL = originalDatabaseUrl;
   });
 
-  it("records successful automatic replenishment uploads", async () => {
+  it("runs only the CPA sync job", async () => {
     const sqlite = await setupSqlite();
-    const cpaInstanceId = insertInstance(sqlite);
-    insertStrategy(sqlite, cpaInstanceId);
-    const backupAccountId = insertBackupAccount(sqlite, "auto@example.com", "rt_auto");
-
-    const cpaClient = await import("@/lib/cpa-client");
-    vi.mocked(cpaClient.uploadRemoteAuthFile).mockResolvedValue(undefined);
-    const jobs = await import("./jobs");
-
-    const result = await jobs.autoReplenish();
-
-    expect(result).toMatchObject({ status: "success" });
-    expect(cpaClient.uploadRemoteAuthFile).toHaveBeenCalledWith(
-      expect.objectContaining({ id: cpaInstanceId }),
-      "codex-auto@example.com-auto.json",
-      expect.objectContaining({ email: "auto@example.com", refresh_token: "rt_auto" }),
-    );
-    expect(expectReplenishmentRecords(sqlite)).toEqual([
-      {
-        source: "auto",
-        status: "success",
-        cpa_instance_id: cpaInstanceId,
-        cpa_instance_name: "target",
-        backup_account_id: backupAccountId,
-        email: "auto@example.com",
-        auth_file_name: "codex-auto@example.com-auto.json",
-        reason_codes: JSON.stringify(["available_accounts_below_target"]),
-        error: null,
-      },
-    ]);
-  });
-
-  it("records failed automatic replenishment uploads", async () => {
-    const sqlite = await setupSqlite();
-    const cpaInstanceId = insertInstance(sqlite);
-    insertStrategy(sqlite, cpaInstanceId);
-    const backupAccountId = insertBackupAccount(sqlite, "broken@example.com", "rt_broken");
-
-    const cpaClient = await import("@/lib/cpa-client");
-    vi.mocked(cpaClient.uploadRemoteAuthFile).mockRejectedValue(new Error("upload denied"));
-    const jobs = await import("./jobs");
-
-    const result = await jobs.autoReplenish();
-
-    expect(result).toMatchObject({
-      status: "error",
-      message: "自动补号完成：上传 0 个，失败实例 1 个",
-    });
-    expect(expectReplenishmentRecords(sqlite)).toEqual([
-      {
-        source: "auto",
-        status: "error",
-        cpa_instance_id: cpaInstanceId,
-        cpa_instance_name: "target",
-        backup_account_id: backupAccountId,
-        email: "broken@example.com",
-        auth_file_name: "codex-broken@example.com-auto.json",
-        reason_codes: JSON.stringify(["available_accounts_below_target"]),
-        error: "upload denied",
-      },
-    ]);
-  });
-
-  it("runs automatic replenishment as part of the CPA sync job", async () => {
-    const sqlite = await setupSqlite();
-    const cpaInstanceId = insertInstance(sqlite);
-    insertStrategy(sqlite, cpaInstanceId);
-    const backupAccountId = insertBackupAccount(sqlite, "sync-auto@example.com", "rt_sync_auto");
+    insertInstance(sqlite);
 
     const cpaClient = await import("@/lib/cpa-client");
     vi.mocked(cpaClient.listRemoteAuthFiles).mockResolvedValue([]);
     vi.mocked(cpaClient.refreshRemoteQuotas).mockResolvedValue([]);
-    vi.mocked(cpaClient.uploadRemoteAuthFile).mockResolvedValue(undefined);
     const jobs = await import("./jobs");
 
     const result = await jobs.runJobByKey("sync-cpa-instances");
 
-    expect(result.status).toBe("success");
-    expect(result.message).toContain("同步完成：1 成功，0 失败");
-    expect(result.message).toContain("自动补号完成：上传 1 个，失败实例 0 个");
-    expect(cpaClient.uploadRemoteAuthFile).toHaveBeenCalledWith(
-      expect.objectContaining({ id: cpaInstanceId }),
-      "codex-sync-auto@example.com-auto.json",
-      expect.objectContaining({ email: "sync-auto@example.com", refresh_token: "rt_sync_auto" }),
-    );
-    expect(expectReplenishmentRecords(sqlite)).toEqual([
-      {
-        source: "auto",
-        status: "success",
-        cpa_instance_id: cpaInstanceId,
-        cpa_instance_name: "target",
-        backup_account_id: backupAccountId,
-        email: "sync-auto@example.com",
-        auth_file_name: "codex-sync-auto@example.com-auto.json",
-        reason_codes: JSON.stringify(["available_accounts_below_target"]),
-        error: null,
-      },
-    ]);
+    expect(result).toMatchObject({
+      status: "success",
+      message: "同步完成：1 成功，0 失败",
+    });
+    expect(cpaClient.uploadRemoteAuthFile).not.toHaveBeenCalled();
     expect(
       sqlite.prepare("SELECT job_key, status FROM job_runs ORDER BY id").all(),
     ).toEqual([{ job_key: "sync-cpa-instances", status: "success" }]);
@@ -285,7 +202,6 @@ describe("refreshAuthFileQuotaById", () => {
       usage5hPercent: 12,
       usageWeekPercent: 34,
     });
-    insertAssignedBackupAccount(sqlite, cpaInstanceId, "target@example.com", "codex-target@example.com-auto.json");
 
     const cpaClient = await import("@/lib/cpa-client");
     vi.mocked(cpaClient.refreshRemoteQuotas).mockResolvedValue([
@@ -350,14 +266,6 @@ describe("refreshAuthFileQuotaById", () => {
       status: "可用",
       status_message: null,
     });
-    expect(
-      sqlite
-        .prepare("SELECT status, exception FROM backup_accounts WHERE email = 'target@example.com'")
-        .get(),
-    ).toMatchObject({
-      status: "assigned",
-      exception: null,
-    });
   });
 });
 
@@ -375,37 +283,6 @@ function insertInstance(sqlite: Database.Database) {
       VALUES ('target', 'https://target.example.com', 'secret', '/v0/management/auth-files', 1)
     `)
     .run();
-  return Number(result.lastInsertRowid);
-}
-
-function insertStrategy(sqlite: Database.Database, cpaInstanceId: number) {
-  sqlite
-    .prepare(`
-      INSERT INTO replenishment_strategies (
-        cpa_instance_id,
-        enabled,
-        maintain_5h_usage_percent,
-        maintain_week_usage_percent,
-        min_available_accounts,
-        max_batch_size
-      )
-      VALUES (?, 1, 0, 0, 1, 1)
-    `)
-    .run(cpaInstanceId);
-}
-
-function insertBackupAccount(sqlite: Database.Database, email: string, refreshToken: string) {
-  const result = sqlite
-    .prepare(`
-      INSERT INTO backup_accounts (source_line, email, refresh_token, status, imported_at)
-      VALUES (@sourceLine, @email, @refreshToken, 'idle', @importedAt)
-    `)
-    .run({
-      sourceLine: `${email}----password----${refreshToken}`,
-      email,
-      refreshToken,
-      importedAt: new Date(Date.UTC(2026, 4, 13, 0, 0, 0)).toISOString(),
-    });
   return Number(result.lastInsertRowid);
 }
 
@@ -478,60 +355,6 @@ function insertQuotaSnapshot(
       )
     `)
     .run({ cpaInstanceId, ...input });
-}
-
-function insertAssignedBackupAccount(
-  sqlite: Database.Database,
-  cpaInstanceId: number,
-  email: string,
-  authFileName: string,
-) {
-  sqlite
-    .prepare(`
-      INSERT INTO backup_accounts (
-        source_line,
-        email,
-        refresh_token,
-        status,
-        assigned_cpa_instance_id,
-        assigned_auth_file_name,
-        exception
-      )
-      VALUES (
-        @sourceLine,
-        @email,
-        'rt_test',
-        'error',
-        @cpaInstanceId,
-        @authFileName,
-        'old error'
-      )
-    `)
-    .run({
-      sourceLine: `${email}----password----rt_test`,
-      email,
-      cpaInstanceId,
-      authFileName,
-    });
-}
-
-function expectReplenishmentRecords(sqlite: Database.Database) {
-  return sqlite
-    .prepare(`
-      SELECT
-        source,
-        status,
-        cpa_instance_id,
-        cpa_instance_name,
-        backup_account_id,
-        email,
-        auth_file_name,
-        reason_codes,
-        error
-      FROM replenishment_records
-      ORDER BY id
-    `)
-    .all();
 }
 
 function globalDb() {

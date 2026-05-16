@@ -9,11 +9,8 @@ const sections = new Set<SectionId>([
   "dashboard",
   "instances",
   "auth",
-  "strategies",
-  "replenishment-records",
   "proxies",
   "jobs",
-  "backups",
 ]);
 
 export default async function DashboardSectionPage({

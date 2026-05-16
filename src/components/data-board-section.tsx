@@ -155,8 +155,8 @@ export function DataBoardSection({ refreshVersion }: { refreshVersion: number })
   }
 
   return (
-    <section className="space-y-5">
-      <div className="space-y-4 rounded-md border bg-card p-4">
+    <section className="space-y-3">
+      <div className="space-y-3 rounded-md border bg-card p-3">
         <div className="flex flex-col gap-1">
           <div className="font-medium">数据范围</div>
           <div className="text-sm text-muted-foreground">{selectedLabel}</div>
@@ -198,7 +198,7 @@ export function DataBoardSection({ refreshVersion }: { refreshVersion: number })
         <MetricCard label="代理" value={data?.stats.proxyCount ?? 0} sub="启用且适用" tone="violet" />
       </div>
 
-      <div className="space-y-3 rounded-md border bg-card p-4">
+      <div className="space-y-3 rounded-md border bg-card p-3">
         <div className="flex flex-col gap-1">
           <div className="font-medium">图表时间范围</div>
           <div className="text-sm text-muted-foreground">仅影响下方趋势图，顶部统计仍展示当前数据。</div>
@@ -237,7 +237,7 @@ export function DataBoardSection({ refreshVersion }: { refreshVersion: number })
         </div>
       </div>
 
-      <div className="grid gap-4 xl:grid-cols-2">
+      <div className="grid gap-3 xl:grid-cols-2">
         <TrendChart
           title="5h剩余趋势"
           data={data?.series ?? []}
@@ -312,7 +312,7 @@ function TrendChart({
   loading: boolean;
 }) {
   return (
-    <Card className="rounded-md">
+    <Card size="sm" className="rounded-md">
       <CardHeader>
         <CardTitle>{title}</CardTitle>
       </CardHeader>

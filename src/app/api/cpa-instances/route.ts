@@ -2,7 +2,7 @@ import { eq } from "drizzle-orm";
 import { z } from "zod";
 
 import { db } from "@/db/client";
-import { cpaInstances, replenishmentStrategies } from "@/db/schema";
+import { cpaInstances } from "@/db/schema";
 import { badRequest, initRequestDb, ok, readJson, requireAuth, serverError } from "@/lib/api";
 
 export const runtime = "nodejs";
@@ -52,13 +52,6 @@ export async function POST(request: Request) {
       })
       .returning()
       .get();
-
-    db.insert(replenishmentStrategies)
-      .values({
-        cpaInstanceId: created.id,
-      })
-      .onConflictDoNothing()
-      .run();
 
     return ok({ instance: created }, { status: 201 });
   } catch (error) {

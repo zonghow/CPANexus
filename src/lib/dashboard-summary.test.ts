@@ -21,10 +21,6 @@ describe("summarizeDashboardStats", () => {
         { cpaInstanceId: 2, usage5hPercent: 0, usageWeekPercent: 0 },
         { cpaInstanceId: 3, usage5hPercent: 10, usageWeekPercent: 20 },
       ],
-      backupAccounts: [
-        { assignedCpaInstanceId: null },
-        { assignedCpaInstanceId: 1 },
-      ],
       proxies: [
         { id: 1, enabled: true },
         { id: 2, enabled: true },
@@ -43,7 +39,6 @@ describe("summarizeDashboardStats", () => {
       enabledInstances: 2,
       authFiles: 2,
       availableAuthFiles: 1,
-      idleBackupAccounts: 1,
       proxies: 1,
       average5hRemainingPercent: 80,
       averageWeekRemainingPercent: 60,

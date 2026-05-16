@@ -91,27 +91,6 @@ export const dashboardMetricSnapshots = sqliteTable(
   ],
 );
 
-export const replenishmentStrategies = sqliteTable(
-  "replenishment_strategies",
-  {
-    id: integer("id").primaryKey({ autoIncrement: true }),
-    cpaInstanceId: integer("cpa_instance_id")
-      .notNull()
-      .references(() => cpaInstances.id, { onDelete: "cascade" }),
-    enabled: integer("enabled", { mode: "boolean" }).notNull().default(false),
-    maintain5hUsagePercent: real("maintain_5h_usage_percent").notNull().default(50),
-    maintainWeekUsagePercent: real("maintain_week_usage_percent").notNull().default(50),
-    minAvailableAccounts: integer("min_available_accounts").notNull().default(1),
-    maxBatchSize: integer("max_batch_size").notNull().default(1),
-    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
-  },
-  (table) => [
-    uniqueIndex("replenishment_strategies_instance_unique").on(
-      table.cpaInstanceId,
-    ),
-  ],
-);
-
 export const proxies = sqliteTable("proxies", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   name: text("name").notNull().default(""),
@@ -135,29 +114,6 @@ export const proxyCpaInstances = sqliteTable(
   },
   (table) => [
     primaryKey({ columns: [table.proxyId, table.cpaInstanceId] }),
-  ],
-);
-
-export const backupAccounts = sqliteTable(
-  "backup_accounts",
-  {
-    id: integer("id").primaryKey({ autoIncrement: true }),
-    sourceLine: text("source_line").notNull(),
-    email: text("email").notNull(),
-    refreshToken: text("refresh_token").notNull(),
-    status: text("status").notNull().default("idle"),
-    assignedCpaInstanceId: integer("assigned_cpa_instance_id").references(
-      () => cpaInstances.id,
-      { onDelete: "set null" },
-    ),
-    assignedAuthFileName: text("assigned_auth_file_name"),
-    exception: text("exception"),
-    importedAt: text("imported_at").notNull().default(sql`CURRENT_TIMESTAMP`),
-    assignedAt: text("assigned_at"),
-    lastCheckedAt: text("last_checked_at"),
-  },
-  (table) => [
-    uniqueIndex("backup_accounts_email_unique").on(table.email),
   ],
 );
 
@@ -187,31 +143,9 @@ export const jobRuns = sqliteTable("job_runs", {
   rawJson: text("raw_json"),
 });
 
-export const replenishmentRecords = sqliteTable("replenishment_records", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
-  source: text("source").notNull(),
-  status: text("status").notNull(),
-  cpaInstanceId: integer("cpa_instance_id").references(() => cpaInstances.id, {
-    onDelete: "set null",
-  }),
-  cpaInstanceName: text("cpa_instance_name"),
-  backupAccountId: integer("backup_account_id").references(() => backupAccounts.id, {
-    onDelete: "set null",
-  }),
-  email: text("email"),
-  authFileName: text("auth_file_name"),
-  reasonCodes: text("reason_codes"),
-  error: text("error"),
-  rawJson: text("raw_json"),
-  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
-});
-
 export type CpaInstance = typeof cpaInstances.$inferSelect;
 export type NewCpaInstance = typeof cpaInstances.$inferInsert;
 export type AuthFile = typeof authFiles.$inferSelect;
-export type BackupAccount = typeof backupAccounts.$inferSelect;
 export type CronJob = typeof cronJobs.$inferSelect;
 export type DashboardMetricSnapshot = typeof dashboardMetricSnapshots.$inferSelect;
 export type Proxy = typeof proxies.$inferSelect;
-export type ReplenishmentRecord = typeof replenishmentRecords.$inferSelect;
-export type ReplenishmentStrategy = typeof replenishmentStrategies.$inferSelect;

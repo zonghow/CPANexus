@@ -49,7 +49,6 @@ describe("/api/auth-files/[id]", () => {
     });
     const authFileId = insertAuthFile(sqlite, sourceId);
     insertQuotaSnapshot(sqlite, sourceId);
-    insertAssignedBackupAccount(sqlite, sourceId);
 
     const cpaClient = await import("@/lib/cpa-client");
     const jobs = await import("@/lib/jobs");
@@ -83,11 +82,6 @@ describe("/api/auth-files/[id]", () => {
     expect(jobs.syncCpaInstanceById).toHaveBeenCalledWith(sourceId);
     expect(sqlite.prepare("SELECT COUNT(*) AS count FROM auth_files").get()).toMatchObject({ count: 0 });
     expect(sqlite.prepare("SELECT COUNT(*) AS count FROM quota_snapshots").get()).toMatchObject({ count: 0 });
-    expect(sqlite.prepare("SELECT status, assigned_cpa_instance_id, assigned_auth_file_name FROM backup_accounts").get()).toMatchObject({
-      status: "idle",
-      assigned_cpa_instance_id: null,
-      assigned_auth_file_name: null,
-    });
   });
 
   it("moves an auth file by uploading to the target CPA before deleting from the source CPA", async () => {
@@ -102,7 +96,6 @@ describe("/api/auth-files/[id]", () => {
     });
     const authFileId = insertAuthFile(sqlite, sourceId);
     insertQuotaSnapshot(sqlite, sourceId);
-    insertAssignedBackupAccount(sqlite, sourceId);
 
     const cpaClient = await import("@/lib/cpa-client");
     const jobs = await import("@/lib/jobs");
@@ -147,11 +140,6 @@ describe("/api/auth-files/[id]", () => {
       available: 0,
     });
     expect(sqlite.prepare("SELECT COUNT(*) AS count FROM quota_snapshots").get()).toMatchObject({ count: 0 });
-    expect(sqlite.prepare("SELECT status, assigned_cpa_instance_id, assigned_auth_file_name FROM backup_accounts").get()).toMatchObject({
-      status: "assigned",
-      assigned_cpa_instance_id: targetId,
-      assigned_auth_file_name: "codex-a@example.com-auto.json",
-    });
   });
 
   it("disables an auth file through the CPA status endpoint and updates local status", async () => {
@@ -512,29 +500,6 @@ function insertProxy(sqlite: Database.Database, cpaInstanceId: number, url: stri
     `)
     .run({ proxyId, cpaInstanceId });
   return proxyId;
-}
-
-function insertAssignedBackupAccount(sqlite: Database.Database, cpaInstanceId: number) {
-  sqlite
-    .prepare(`
-      INSERT INTO backup_accounts (
-        source_line,
-        email,
-        refresh_token,
-        status,
-        assigned_cpa_instance_id,
-        assigned_auth_file_name
-      )
-      VALUES (
-        'a@example.com----password----rt_test',
-        'a@example.com',
-        'rt_test',
-        'assigned',
-        @cpaInstanceId,
-        'codex-a@example.com-auto.json'
-      )
-    `)
-    .run({ cpaInstanceId });
 }
 
 function globalDb() {

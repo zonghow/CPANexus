@@ -67,19 +67,6 @@ export function migrate() {
     CREATE INDEX IF NOT EXISTS dashboard_metric_snapshots_time_idx
       ON dashboard_metric_snapshots(captured_at);
 
-    CREATE TABLE IF NOT EXISTS replenishment_strategies (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      cpa_instance_id INTEGER NOT NULL REFERENCES cpa_instances(id) ON DELETE CASCADE,
-      enabled INTEGER NOT NULL DEFAULT 0,
-      maintain_5h_usage_percent REAL NOT NULL DEFAULT 50,
-      maintain_week_usage_percent REAL NOT NULL DEFAULT 50,
-      min_available_accounts INTEGER NOT NULL DEFAULT 1,
-      max_batch_size INTEGER NOT NULL DEFAULT 1,
-      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-    );
-    CREATE UNIQUE INDEX IF NOT EXISTS replenishment_strategies_instance_unique
-      ON replenishment_strategies(cpa_instance_id);
-
     CREATE TABLE IF NOT EXISTS proxies (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL DEFAULT '',
@@ -116,22 +103,6 @@ export function migrate() {
       PRIMARY KEY (proxy_id, cpa_instance_id)
     );
 
-    CREATE TABLE IF NOT EXISTS backup_accounts (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      source_line TEXT NOT NULL,
-      email TEXT NOT NULL,
-      refresh_token TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'idle',
-      assigned_cpa_instance_id INTEGER REFERENCES cpa_instances(id) ON DELETE SET NULL,
-      assigned_auth_file_name TEXT,
-      exception TEXT,
-      imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      assigned_at TEXT,
-      last_checked_at TEXT
-    );
-    CREATE UNIQUE INDEX IF NOT EXISTS backup_accounts_email_unique
-      ON backup_accounts(email);
-
     CREATE TABLE IF NOT EXISTS cron_jobs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       key TEXT NOT NULL,
@@ -155,22 +126,6 @@ export function migrate() {
       raw_json TEXT
     );
 
-    CREATE TABLE IF NOT EXISTS replenishment_records (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      source TEXT NOT NULL,
-      status TEXT NOT NULL,
-      cpa_instance_id INTEGER REFERENCES cpa_instances(id) ON DELETE SET NULL,
-      cpa_instance_name TEXT,
-      backup_account_id INTEGER REFERENCES backup_accounts(id) ON DELETE SET NULL,
-      email TEXT,
-      auth_file_name TEXT,
-      reason_codes TEXT,
-      error TEXT,
-      raw_json TEXT,
-      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-    );
-    CREATE INDEX IF NOT EXISTS replenishment_records_created_at_idx
-      ON replenishment_records(created_at);
   `);
 
   const seed = sqlite.prepare(`

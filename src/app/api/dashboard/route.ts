@@ -1,7 +1,6 @@
 import { db } from "@/db/client";
 import {
   authFiles,
-  backupAccounts,
   cpaInstances,
   proxies,
   proxyCpaInstances,
@@ -24,7 +23,6 @@ export async function GET(request: Request) {
       cpaInstances: db.select().from(cpaInstances).all(),
       authFiles: db.select().from(authFiles).all(),
       quotaSnapshots: db.select().from(quotaSnapshots).all(),
-      backupAccounts: db.select().from(backupAccounts).all(),
       proxies: db.select().from(proxies).all(),
       proxyCpaInstances: db.select().from(proxyCpaInstances).all(),
     });

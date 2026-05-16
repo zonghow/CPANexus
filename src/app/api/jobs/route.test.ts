@@ -36,7 +36,7 @@ describe("/api/jobs", () => {
     getSqlite()
       .prepare(`
         INSERT INTO job_runs (job_key, status, message, started_at, finished_at)
-        VALUES ('auto-replenish', 'success', 'legacy auto replenish run', '2026-05-14T06:00:00.000Z', '2026-05-14T06:00:01.000Z')
+        VALUES ('legacy-removed-job', 'success', 'legacy removed job run', '2026-05-14T06:00:00.000Z', '2026-05-14T06:00:01.000Z')
       `)
       .run();
     const route = await import("./route");
@@ -66,6 +66,62 @@ describe("/api/jobs", () => {
       secondsUntilNextRun: 510,
     });
     expect(syncJob?.nextRunAt).toBe(new Date(2026, 4, 14, 15, 0, 0, 0).toISOString());
+  });
+
+  it("paginates current job execution records", async () => {
+    const { migrate } = await import("@/db/migrate");
+    const { getSqlite } = await import("@/db/client");
+    migrate();
+    const sqlite = getSqlite();
+    const insertRun = sqlite.prepare(`
+      INSERT INTO job_runs (job_key, status, message, started_at, finished_at)
+      VALUES (@jobKey, 'success', @message, @startedAt, @finishedAt)
+    `);
+    for (let index = 0; index < 65; index += 1) {
+      const startedAt = new Date(Date.UTC(2026, 4, 14, 8, 0, 0) + index * 60_000);
+      insertRun.run({
+        jobKey: "sync-cpa-instances",
+        message: `run-${String(index + 1).padStart(2, "0")}`,
+        startedAt: startedAt.toISOString(),
+        finishedAt: new Date(startedAt.getTime() + 1000).toISOString(),
+      });
+    }
+    insertRun.run({
+      jobKey: "legacy-removed-job",
+      message: "legacy",
+      startedAt: new Date(Date.UTC(2026, 4, 14, 9, 30, 0)).toISOString(),
+      finishedAt: new Date(Date.UTC(2026, 4, 14, 9, 30, 1)).toISOString(),
+    });
+    const route = await import("./route");
+
+    const response = await route.GET(
+      new Request("http://localhost/api/jobs?runsPage=2&runsPageSize=20", {
+        headers: authHeaders(),
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    const payload = (await response.json()) as {
+      runs: Array<{ jobKey: string; message: string }>;
+      runsPagination: { page: number; pageSize: number; total: number; totalPages: number };
+    };
+
+    expect(payload.runsPagination).toEqual({
+      page: 2,
+      pageSize: 20,
+      total: 65,
+      totalPages: 4,
+    });
+    expect(payload.runs).toHaveLength(20);
+    expect(payload.runs[0]).toMatchObject({
+      jobKey: "sync-cpa-instances",
+      message: "run-45",
+    });
+    expect(payload.runs.at(-1)).toMatchObject({
+      jobKey: "sync-cpa-instances",
+      message: "run-26",
+    });
+    expect(payload.runs.map((run) => run.jobKey)).not.toContain("legacy-removed-job");
   });
 });
 

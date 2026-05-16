@@ -45,8 +45,6 @@ describe("/api/cpa-instances/[id]/auth-files/batch", () => {
     const secondId = insertAuthFile(sqlite, cpaInstanceId, "codex-second@example.com-auto.json");
     insertQuotaSnapshot(sqlite, cpaInstanceId, "codex-first@example.com-auto.json");
     insertQuotaSnapshot(sqlite, cpaInstanceId, "codex-second@example.com-auto.json");
-    insertAssignedBackupAccount(sqlite, cpaInstanceId, "codex-first@example.com-auto.json");
-    insertAssignedBackupAccount(sqlite, cpaInstanceId, "codex-second@example.com-auto.json");
 
     const cpaClient = await import("@/lib/cpa-client");
     const jobs = await import("@/lib/jobs");
@@ -88,11 +86,6 @@ describe("/api/cpa-instances/[id]/auth-files/batch", () => {
     expect(jobs.syncCpaInstanceById).toHaveBeenCalledWith(cpaInstanceId);
     expect(sqlite.prepare("SELECT COUNT(*) AS count FROM auth_files").get()).toMatchObject({ count: 0 });
     expect(sqlite.prepare("SELECT COUNT(*) AS count FROM quota_snapshots").get()).toMatchObject({ count: 0 });
-    expect(
-      sqlite
-        .prepare("SELECT COUNT(*) AS count FROM backup_accounts WHERE assigned_cpa_instance_id IS NULL")
-        .get(),
-    ).toMatchObject({ count: 2 });
   });
 
   it("disables selected auth files through CPA status endpoint, then syncs once", async () => {
@@ -156,6 +149,140 @@ describe("/api/cpa-instances/[id]/auth-files/batch", () => {
         available: 0,
         status: "已停用",
         status_message: "批量停用异常账号",
+      },
+    ]);
+  });
+
+  it("deletes only free auth files when the free target is requested", async () => {
+    const sqlite = await setupSqlite();
+    const cpaInstanceId = insertInstance(sqlite);
+    const freeId = insertAuthFile(sqlite, cpaInstanceId, "codex-free@example.com-auto.json");
+    const plusId = insertAuthFile(sqlite, cpaInstanceId, "codex-plus@example.com-auto.json");
+    const unknownId = insertAuthFile(sqlite, cpaInstanceId, "codex-unknown@example.com-auto.json");
+    insertQuotaSnapshot(sqlite, cpaInstanceId, "codex-free@example.com-auto.json", {
+      rawJson: JSON.stringify({ plan_type: "free" }),
+    });
+    insertQuotaSnapshot(sqlite, cpaInstanceId, "codex-plus@example.com-auto.json", {
+      rawJson: JSON.stringify({ plan_type: "plus" }),
+    });
+
+    const cpaClient = await import("@/lib/cpa-client");
+    const jobs = await import("@/lib/jobs");
+    vi.mocked(cpaClient.deleteRemoteAuthFile).mockResolvedValue(undefined);
+    vi.mocked(jobs.syncCpaInstanceById).mockResolvedValue({
+      instance: "target",
+      status: "success",
+      message: "synced",
+    });
+    const route = await import("./route");
+
+    const response = await route.POST(
+      new Request("http://localhost/api/cpa-instances/1/auth-files/batch", {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ action: "delete", target: "free" }),
+      }),
+      { params: Promise.resolve({ id: String(cpaInstanceId) }) },
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      status: "ok",
+      processed: 1,
+      action: "delete",
+    });
+    expect(cpaClient.deleteRemoteAuthFile).toHaveBeenCalledTimes(1);
+    expect(cpaClient.deleteRemoteAuthFile).toHaveBeenCalledWith(
+      expect.objectContaining({ id: cpaInstanceId }),
+      "codex-free@example.com-auto.json",
+    );
+    expect(jobs.syncCpaInstanceById).toHaveBeenCalledTimes(1);
+    expect(
+      sqlite.prepare("SELECT id, file_name FROM auth_files ORDER BY id").all(),
+    ).toEqual([
+      { id: plusId, file_name: "codex-plus@example.com-auto.json" },
+      { id: unknownId, file_name: "codex-unknown@example.com-auto.json" },
+    ]);
+    expect(sqlite.prepare("SELECT COUNT(*) AS count FROM auth_files WHERE id = @freeId").get({ freeId })).toMatchObject({
+      count: 0,
+    });
+  });
+
+  it("disables only active free auth files when the free target is requested", async () => {
+    const sqlite = await setupSqlite();
+    const cpaInstanceId = insertInstance(sqlite);
+    const activeFreeId = insertAuthFile(sqlite, cpaInstanceId, "codex-active-free@example.com-auto.json");
+    const disabledFreeId = insertAuthFile(sqlite, cpaInstanceId, "codex-disabled-free@example.com-auto.json", {
+      disabled: true,
+    });
+    const plusId = insertAuthFile(sqlite, cpaInstanceId, "codex-plus@example.com-auto.json");
+    insertQuotaSnapshot(sqlite, cpaInstanceId, "codex-active-free@example.com-auto.json", {
+      rawJson: JSON.stringify({ rate_limit: { plan_type: "free" } }),
+    });
+    insertQuotaSnapshot(sqlite, cpaInstanceId, "codex-disabled-free@example.com-auto.json", {
+      rawJson: JSON.stringify({ plan_type: "free" }),
+    });
+    insertQuotaSnapshot(sqlite, cpaInstanceId, "codex-plus@example.com-auto.json", {
+      rawJson: JSON.stringify({ plan_type: "plus" }),
+    });
+
+    const cpaClient = await import("@/lib/cpa-client");
+    const jobs = await import("@/lib/jobs");
+    vi.mocked(cpaClient.setRemoteAuthFileDisabled).mockResolvedValue(undefined);
+    vi.mocked(jobs.syncCpaInstanceById).mockResolvedValue({
+      instance: "target",
+      status: "success",
+      message: "synced",
+    });
+    const route = await import("./route");
+
+    const response = await route.POST(
+      new Request("http://localhost/api/cpa-instances/1/auth-files/batch", {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ action: "disable", target: "free" }),
+      }),
+      { params: Promise.resolve({ id: String(cpaInstanceId) }) },
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      status: "ok",
+      processed: 1,
+      action: "disable",
+    });
+    expect(cpaClient.setRemoteAuthFileDisabled).toHaveBeenCalledTimes(1);
+    expect(cpaClient.setRemoteAuthFileDisabled).toHaveBeenCalledWith(
+      expect.objectContaining({ id: cpaInstanceId }),
+      "codex-active-free@example.com-auto.json",
+      true,
+    );
+    expect(jobs.syncCpaInstanceById).toHaveBeenCalledTimes(1);
+    expect(
+      sqlite
+        .prepare("SELECT id, disabled, available, status, status_message FROM auth_files ORDER BY id")
+        .all(),
+    ).toEqual([
+      {
+        id: activeFreeId,
+        disabled: 1,
+        available: 0,
+        status: "已停用",
+        status_message: "批量停用Free号",
+      },
+      {
+        id: disabledFreeId,
+        disabled: 1,
+        available: 0,
+        status: "异常",
+        status_message: "bad token",
+      },
+      {
+        id: plusId,
+        disabled: 0,
+        available: 0,
+        status: "异常",
+        status_message: "bad token",
       },
     ]);
   });
@@ -332,7 +459,12 @@ function linkProxyToCpa(sqlite: Database.Database, proxyId: number, cpaInstanceI
     .run({ proxyId, cpaInstanceId });
 }
 
-function insertQuotaSnapshot(sqlite: Database.Database, cpaInstanceId: number, authFileName: string) {
+function insertQuotaSnapshot(
+  sqlite: Database.Database,
+  cpaInstanceId: number,
+  authFileName: string,
+  options: { rawJson?: string | null } = {},
+) {
   sqlite
     .prepare(`
       INSERT INTO quota_snapshots (
@@ -340,49 +472,23 @@ function insertQuotaSnapshot(sqlite: Database.Database, cpaInstanceId: number, a
         auth_file_name,
         email,
         available,
-        exception
+        exception,
+        raw_json
       )
       VALUES (
         @cpaInstanceId,
         @authFileName,
         @email,
         0,
-        'bad token'
+        'bad token',
+        @rawJson
       )
     `)
     .run({
       cpaInstanceId,
       authFileName,
       email: authFileName.replace(/^codex-/, "").replace(/-auto\.json$/, ""),
-    });
-}
-
-function insertAssignedBackupAccount(sqlite: Database.Database, cpaInstanceId: number, authFileName: string) {
-  const email = authFileName.replace(/^codex-/, "").replace(/-auto\.json$/, "");
-  sqlite
-    .prepare(`
-      INSERT INTO backup_accounts (
-        source_line,
-        email,
-        refresh_token,
-        status,
-        assigned_cpa_instance_id,
-        assigned_auth_file_name
-      )
-      VALUES (
-        @sourceLine,
-        @email,
-        'rt_test',
-        'assigned',
-        @cpaInstanceId,
-        @authFileName
-      )
-    `)
-    .run({
-      sourceLine: `${email}----password----rt_test`,
-      email,
-      cpaInstanceId,
-      authFileName,
+      rawJson: options.rawJson ?? null,
     });
 }
 

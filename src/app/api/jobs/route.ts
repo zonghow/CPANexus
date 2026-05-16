@@ -1,4 +1,4 @@
-import { desc, inArray } from "drizzle-orm";
+import { desc, inArray, sql } from "drizzle-orm";
 
 import { db } from "@/db/client";
 import { cronJobs, jobRuns } from "@/db/schema";
@@ -16,14 +16,29 @@ export async function GET(request: Request) {
 
     initRequestDb();
     const now = new Date();
+    const url = new URL(request.url);
+    const requestedRunsPage = parsePositiveInteger(url.searchParams.get("runsPage")) ?? 1;
+    const runsPageSize = Math.min(
+      100,
+      Math.max(10, parsePositiveInteger(url.searchParams.get("runsPageSize")) ?? 20),
+    );
     const jobs = db.select().from(cronJobs).orderBy(cronJobs.name).all();
     const jobKeys = jobs.map((job) => job.key);
+    const runsWhere = jobKeys.length > 0 ? inArray(jobRuns.jobKey, jobKeys) : undefined;
+    const runsTotal = db
+      .select({ count: sql<number>`count(*)` })
+      .from(jobRuns)
+      .where(runsWhere)
+      .get()?.count ?? 0;
+    const runsTotalPages = Math.max(1, Math.ceil(runsTotal / runsPageSize));
+    const runsPage = Math.min(requestedRunsPage, runsTotalPages);
     const runs = db
       .select()
       .from(jobRuns)
-      .where(jobKeys.length > 0 ? inArray(jobRuns.jobKey, jobKeys) : undefined)
+      .where(runsWhere)
       .orderBy(desc(jobRuns.startedAt))
-      .limit(50)
+      .limit(runsPageSize)
+      .offset((runsPage - 1) * runsPageSize)
       .all();
 
     return ok({
@@ -38,8 +53,23 @@ export async function GET(request: Request) {
         };
       }),
       runs,
+      runsPagination: {
+        page: runsPage,
+        pageSize: runsPageSize,
+        total: runsTotal,
+        totalPages: runsTotalPages,
+      },
     });
   } catch (error) {
     return serverError(error);
   }
+}
+
+function parsePositiveInteger(value: string | null) {
+  if (!value) {
+    return null;
+  }
+
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
 }

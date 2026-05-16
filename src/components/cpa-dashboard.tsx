@@ -3,13 +3,11 @@
 import {
   Activity,
   BarChart3,
+  ChevronLeft,
+  ChevronRight,
   Copy,
-  Database,
   ExternalLink,
   FileKey2,
-  History,
-  KeyRound,
-  ListChecks,
   Loader2,
   LogOut,
   LogIn,
@@ -23,7 +21,7 @@ import {
   Trash2,
 } from "lucide-react";
 import Link from "next/link";
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { toast } from "sonner";
 
@@ -61,7 +59,7 @@ import { DataBoardSection } from "@/components/data-board-section";
 import { resolveAccountQuotaStatus, type AccountQuotaState } from "@/lib/account-quota-status";
 import { sortAccountRows } from "@/lib/account-sort";
 import { onlyEnabledCpaGroups } from "@/lib/cpa-groups";
-import { cpaTableUpdatingIdsForJob } from "@/lib/cpa-sync-targets";
+import { cpaTableUpdatingIdsForJob, jobFinishedAtOrAfter } from "@/lib/cpa-sync-targets";
 import {
   cronToSimpleSchedule,
   describeSimpleSchedule,
@@ -70,6 +68,8 @@ import {
   type CronSimpleSchedule,
 } from "@/lib/cron-presets";
 import { averageRemainingPercent } from "@/lib/quota-summary";
+import { defaultRtLoginProxyMode, type RtLoginProxyMode } from "@/lib/rt-login-ui";
+import { isFreeSubscriptionType } from "@/lib/subscription";
 import { cn } from "@/lib/utils";
 
 type CpaInstance = {
@@ -106,22 +106,12 @@ type QuotaSnapshot = {
   subscriptionType: string | null;
   usage5hPercent: number | null;
   usageWeekPercent: number | null;
+  usage5hResetAt: string | null;
+  usageWeekResetAt: string | null;
   available: boolean;
   exception: string | null;
   rawJson: string | null;
   capturedAt: string;
-};
-
-type StrategyRow = {
-  instance: CpaInstance;
-  strategy: {
-    cpaInstanceId: number;
-    enabled: boolean;
-    maintain5hUsagePercent: number;
-    maintainWeekUsagePercent: number;
-    minAvailableAccounts: number;
-    maxBatchSize: number;
-  };
 };
 
 type ProxyRow = {
@@ -140,17 +130,6 @@ type ProxyCheckResult = {
   latencyMs: number | null;
   message: string;
   checkedAt: string;
-};
-
-type BackupAccount = {
-  id: number;
-  email: string;
-  status: string;
-  assignedCpaInstanceId: number | null;
-  assignedAuthFileName: string | null;
-  exception: string | null;
-  importedAt: string;
-  ownerName: string | null;
 };
 
 type CronJob = {
@@ -175,21 +154,21 @@ type JobRun = {
   finishedAt: string | null;
 };
 
-type ReplenishmentRecord = {
-  id: number;
-  source: "auto" | "manual" | "quick" | string;
-  status: "success" | "error" | string;
-  cpaInstanceId: number | null;
-  cpaInstanceName: string | null;
-  backupAccountId: number | null;
-  email: string | null;
-  authFileName: string | null;
-  reasonCodes: string | null;
-  error: string | null;
-  createdAt: string;
+type JobRunsPagination = {
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+};
+
+type JobsApiResponse = {
+  jobs: CronJob[];
+  runs: JobRun[];
+  runsPagination: JobRunsPagination;
 };
 
 type BatchExceptionAction = "delete" | "disable";
+type BatchAuthFileTarget = "selected" | "free";
 
 type CronJobDraft = CronJob & {
   schedule: CronSimpleSchedule;
@@ -200,15 +179,37 @@ type CodexOAuthStartResult = {
   state: string | null;
 };
 
+type RtLoginMode = "rt" | "mobile_rt";
+type RtLoginAccountOptions = {
+  proxyId?: number | null;
+};
+
+type RtLoginAuthResult = {
+  email: string;
+  fileName: string;
+  planType: string;
+  payload: Record<string, unknown>;
+  refreshToken: string;
+  sourceLine: string;
+};
+
+type RtLoginUploadResult = {
+  uploaded: number;
+  failed: number;
+  results: Array<{
+    email: string | null;
+    fileName: string | null;
+    status: "success" | "error" | string;
+    error?: string;
+  }>;
+};
+
 const navItems = [
   { id: "auth", label: "账号管理", icon: FileKey2, href: "/auth" },
   { id: "dashboard", label: "数据看板", icon: BarChart3, href: "/dashboard" },
   { id: "instances", label: "CPA管理", icon: Server, href: "/instances" },
-  { id: "strategies", label: "自动补号", icon: ListChecks, href: "/strategies" },
-  { id: "replenishment-records", label: "补号记录", icon: History, href: "/replenishment-records" },
   { id: "proxies", label: "代理管理", icon: Network, href: "/proxies" },
   { id: "jobs", label: "定时任务", icon: Activity, href: "/jobs" },
-  { id: "backups", label: "替补账号", icon: KeyRound, href: "/backups" },
 ] as const;
 
 export type SectionId = (typeof navItems)[number]["id"];
@@ -259,17 +260,27 @@ const emptyProxy = {
   cpaInstanceIds: [] as number[],
 };
 
+const defaultJobRunsPagination: JobRunsPagination = {
+  page: 1,
+  pageSize: 20,
+  total: 0,
+  totalPages: 1,
+};
+const syncJobKey = "sync-cpa-instances";
+const scheduledSyncPollIntervalMs = 2000;
+const scheduledSyncTimeoutMs = 10 * 60 * 1000;
+
 export function CpaDashboard({ section = "instances" }: { section?: SectionId }) {
   const activeSection = section;
   const [instances, setInstances] = useState<CpaInstance[]>([]);
   const [authGroups, setAuthGroups] = useState<Array<{ instance: CpaInstance; authFiles: AuthFile[] }>>([]);
   const [quotaGroups, setQuotaGroups] = useState<Array<{ instance: CpaInstance; quotas: QuotaSnapshot[] }>>([]);
-  const [strategies, setStrategies] = useState<StrategyRow[]>([]);
   const [proxies, setProxies] = useState<ProxyRow[]>([]);
-  const [backupAccounts, setBackupAccounts] = useState<BackupAccount[]>([]);
   const [jobs, setJobs] = useState<CronJob[]>([]);
   const [runs, setRuns] = useState<JobRun[]>([]);
-  const [replenishmentRecords, setReplenishmentRecords] = useState<ReplenishmentRecord[]>([]);
+  const [runsPagination, setRunsPagination] = useState<JobRunsPagination>(defaultJobRunsPagination);
+  const runsPaginationRef = useRef<JobRunsPagination>(defaultJobRunsPagination);
+  const scheduledSyncRunRef = useRef<string | null>(null);
   const [message, setMessage] = useState("");
   const [updatingCpaIds, setUpdatingCpaIds] = useState<Set<number>>(() => new Set());
   const [runningJobKeys, setRunningJobKeys] = useState<Set<string>>(() => new Set());
@@ -283,37 +294,85 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
   const [proxyForm, setProxyForm] = useState(emptyProxy);
   const [editingProxyId, setEditingProxyId] = useState<number | null>(null);
   const [proxyDialogOpen, setProxyDialogOpen] = useState(false);
-  const [backupText, setBackupText] = useState("");
 
   const activeLabel = navItems.find((item) => item.id === activeSection)?.label ?? "CPA Nexus";
 
-  async function loadAll() {
+  const markCpaTablesUpdating = useCallback((cpaInstanceIds: number[], updating: boolean) => {
+    if (cpaInstanceIds.length === 0) {
+      return;
+    }
+
+    setUpdatingCpaIds((current) => {
+      const next = new Set(current);
+      cpaInstanceIds.forEach((id) => {
+        if (updating) {
+          next.add(id);
+        } else {
+          next.delete(id);
+        }
+      });
+      return next;
+    });
+  }, []);
+
+  const markJobRunning = useCallback((key: string, running: boolean) => {
+    setRunningJobKeys((current) => {
+      const next = new Set(current);
+      if (running) {
+        next.add(key);
+      } else {
+        next.delete(key);
+      }
+      return next;
+    });
+  }, []);
+
+  const applyJobsResponse = useCallback((jobRes: JobsApiResponse) => {
+    setJobs(jobRes.jobs);
+    setRuns(jobRes.runs);
+    const nextRunsPagination = jobRes.runsPagination ?? defaultJobRunsPagination;
+    runsPaginationRef.current = nextRunsPagination;
+    setRunsPagination(nextRunsPagination);
+  }, []);
+
+  const fetchJobs = useCallback(async (options: { runsPage?: number; runsPageSize?: number } = {}) => {
+    const requestedRunsPage = options.runsPage ?? runsPaginationRef.current.page;
+    const requestedRunsPageSize = options.runsPageSize ?? runsPaginationRef.current.pageSize;
+    const jobsSearchParams = new URLSearchParams({
+      runsPage: String(requestedRunsPage),
+      runsPageSize: String(requestedRunsPageSize),
+    });
+    const jobRes = await fetchJson<JobsApiResponse>(`/api/jobs?${jobsSearchParams.toString()}`);
+    applyJobsResponse(jobRes);
+    return jobRes;
+  }, [applyJobsResponse]);
+
+  const loadAll = useCallback(async (options: { runsPage?: number; runsPageSize?: number } = {}) => {
     try {
-      const [instanceRes, authRes, quotaRes, strategyRes, recordRes, proxyRes, backupRes, jobRes] =
+      const requestedRunsPage = options.runsPage ?? runsPaginationRef.current.page;
+      const requestedRunsPageSize = options.runsPageSize ?? runsPaginationRef.current.pageSize;
+      const jobsSearchParams = new URLSearchParams({
+        runsPage: String(requestedRunsPage),
+        runsPageSize: String(requestedRunsPageSize),
+      });
+      const [instanceRes, authRes, quotaRes, proxyRes, jobRes] =
         await Promise.all([
           fetchJson<{ instances: CpaInstance[] }>("/api/cpa-instances"),
           fetchJson<{ groups: Array<{ instance: CpaInstance; authFiles: AuthFile[] }> }>("/api/auth-files"),
           fetchJson<{ groups: Array<{ instance: CpaInstance; quotas: QuotaSnapshot[] }> }>("/api/quotas"),
-          fetchJson<{ strategies: StrategyRow[] }>("/api/strategies"),
-          fetchJson<{ records: ReplenishmentRecord[] }>("/api/replenishment-records"),
           fetchJson<{ proxies: ProxyRow[]; instances: CpaInstance[] }>("/api/proxies"),
-          fetchJson<{ accounts: BackupAccount[] }>("/api/backup-accounts"),
-          fetchJson<{ jobs: CronJob[]; runs: JobRun[] }>("/api/jobs"),
+          fetchJson<JobsApiResponse>(`/api/jobs?${jobsSearchParams.toString()}`),
         ]);
       setInstances(instanceRes.instances);
       setAuthGroups(authRes.groups);
       setQuotaGroups(quotaRes.groups);
-      setStrategies(strategyRes.strategies);
-      setReplenishmentRecords(recordRes.records);
       setProxies(proxyRes.proxies);
-      setBackupAccounts(backupRes.accounts);
-      setJobs(jobRes.jobs);
-      setRuns(jobRes.runs);
+      applyJobsResponse(jobRes);
       setDataRefreshVersion((version) => version + 1);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
     }
-  }
+  }, [applyJobsResponse]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -321,7 +380,7 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
     }, 0);
 
     return () => window.clearTimeout(timer);
-  }, []);
+  }, [loadAll]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
@@ -329,29 +388,72 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
   }, []);
 
   const syncJob = useMemo(
-    () => jobs.find((job) => job.key === "sync-cpa-instances") ?? null,
+    () => jobs.find((job) => job.key === syncJobKey) ?? null,
     [jobs],
   );
   const syncCountdownSeconds = useMemo(
     () => secondsUntilJobRun(syncJob, nowMs),
     [syncJob, nowMs],
   );
-  const isSyncJobRunning = runningJobKeys.has("sync-cpa-instances");
+  const isSyncJobRunning = runningJobKeys.has(syncJobKey);
   const syncButtonLabel = formatSyncButtonLabel(syncJob, syncCountdownSeconds, isSyncJobRunning);
   const syncButtonTitle = formatSyncButtonTitle(syncJob, syncCountdownSeconds, isSyncJobRunning);
+
+  const waitForScheduledSyncCompletion = useCallback(async (scheduledRunAt: string) => {
+    const deadline = Date.now() + scheduledSyncTimeoutMs;
+
+    while (Date.now() < deadline) {
+      await sleep(scheduledSyncPollIntervalMs);
+      const jobRes = await fetchJobs({ runsPage: 1 });
+      const latestSyncJob = jobRes.jobs.find((job) => job.key === syncJobKey);
+      if (latestSyncJob && jobFinishedAtOrAfter(latestSyncJob, scheduledRunAt)) {
+        return true;
+      }
+    }
+
+    return false;
+  }, [fetchJobs]);
+
+  const handleScheduledSyncStart = useCallback(async (scheduledRunAt: string) => {
+    if (scheduledSyncRunRef.current === scheduledRunAt) {
+      return;
+    }
+
+    scheduledSyncRunRef.current = scheduledRunAt;
+    const updatingIds = cpaTableUpdatingIdsForJob(syncJobKey, instances);
+    markJobRunning(syncJobKey, true);
+    markCpaTablesUpdating(updatingIds, true);
+
+    try {
+      await waitForScheduledSyncCompletion(scheduledRunAt);
+      await loadAll({ runsPage: 1 });
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      markCpaTablesUpdating(updatingIds, false);
+      markJobRunning(syncJobKey, false);
+      scheduledSyncRunRef.current = null;
+    }
+  }, [instances, loadAll, markCpaTablesUpdating, markJobRunning, waitForScheduledSyncCompletion]);
 
   useEffect(() => {
     if (!syncJob?.enabled || !syncJob.nextRunAt) {
       return;
     }
 
-    const delay = Math.max(1000, new Date(syncJob.nextRunAt).getTime() - Date.now() + 1500);
+    const nextRunAt = syncJob.nextRunAt;
+    const nextRunAtMs = new Date(nextRunAt).getTime();
+    if (!Number.isFinite(nextRunAtMs)) {
+      return;
+    }
+
+    const delay = Math.max(0, nextRunAtMs - Date.now());
     const timer = window.setTimeout(() => {
-      void loadAll();
+      void handleScheduledSyncStart(nextRunAt);
     }, delay);
 
     return () => window.clearTimeout(timer);
-  }, [syncJob?.enabled, syncJob?.nextRunAt]);
+  }, [handleScheduledSyncStart, syncJob?.enabled, syncJob?.nextRunAt]);
 
   function findAuthFileCpaInstanceId(authFileId: number) {
     for (const group of authGroups) {
@@ -451,17 +553,6 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
     }
   }
 
-  async function importBackupAccounts(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const result = await mutate<{ imported: number; skipped: number; invalid: unknown[] }>("/api/backup-accounts", {
-      method: "POST",
-      body: JSON.stringify({ text: backupText }),
-    });
-    setBackupText("");
-    setMessage(`导入 ${result.imported} 个，跳过 ${result.skipped} 个，异常 ${result.invalid.length} 行`);
-    await loadAll();
-  }
-
   async function runJob(key: string) {
     const updatingIds = cpaTableUpdatingIdsForJob(key, instances);
     setRunningJobKeys((current) => {
@@ -475,7 +566,7 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
           method: "POST",
         });
         setMessage(result.message);
-        await loadAll();
+        await loadAll({ runsPage: 1 });
       });
     } finally {
       setRunningJobKeys((current) => {
@@ -600,27 +691,44 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
     }
   }
 
-  async function replenishCpaAccounts(
+  async function rtLoginCpaAccount(
     cpaInstanceId: number,
-    payload: { count?: number; backupAccountIds?: number[] },
+    mode: RtLoginMode,
+    line: string,
+    options: RtLoginAccountOptions = {},
   ) {
-    try {
-      await withUpdatingCpaTables([cpaInstanceId], async () => {
-        const result = await mutate<{ uploaded: number; requested: number }>(
-          `/api/cpa-instances/${cpaInstanceId}/replenish`,
-          {
-            method: "POST",
-            body: JSON.stringify(payload),
-          },
-        );
-        setMessage("");
-        toast.success(`补号完成：上传 ${result.uploaded}/${result.requested} 个`);
-        await loadAll();
-      });
-    } catch (error) {
+    return await mutate<RtLoginAuthResult>(
+      `/api/cpa-instances/${cpaInstanceId}/rt-login`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          action: "login",
+          mode,
+          line,
+          proxyId: options.proxyId ?? null,
+        }),
+      },
+    );
+  }
+
+  async function uploadRtLoginCpaAccounts(
+    cpaInstanceId: number,
+    mode: RtLoginMode,
+    entries: RtLoginAuthResult[],
+  ) {
+    let result: RtLoginUploadResult | null = null;
+    await withUpdatingCpaTables([cpaInstanceId], async () => {
+      result = await mutate<RtLoginUploadResult>(
+        `/api/cpa-instances/${cpaInstanceId}/rt-login`,
+        {
+          method: "POST",
+          body: JSON.stringify({ action: "upload", mode, entries }),
+        },
+      );
       setMessage("");
-      toast.error(error instanceof Error ? error.message : String(error));
-    }
+      await loadAll();
+    });
+    return result;
   }
 
   async function batchHandleExceptionAuthFiles(
@@ -629,6 +737,7 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
     authFileIds: number[],
     successVerb: string,
     subject: string,
+    target: BatchAuthFileTarget = "selected",
   ) {
     if (authFileIds.length === 0) {
       setMessage("");
@@ -642,7 +751,11 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
           `/api/cpa-instances/${cpaInstanceId}/auth-files/batch`,
           {
             method: "POST",
-            body: JSON.stringify({ action, authFileIds }),
+            body: JSON.stringify(
+              target === "free"
+                ? { action, target }
+                : { action, authFileIds },
+            ),
           },
         );
         setMessage("");
@@ -731,19 +844,16 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
 
   return (
     <div className="min-h-screen bg-[color-mix(in_oklch,var(--background),var(--muted)_35%)] text-foreground">
-      <div className="grid min-h-screen grid-cols-1 lg:grid-cols-[208px_1fr]">
-        <aside className="border-b bg-sidebar/90 lg:border-b-0 lg:border-r">
+      <div className="grid min-h-screen grid-cols-1 lg:grid-cols-[132px_1fr]">
+        <aside className="border-b bg-sidebar/90 lg:sticky lg:top-0 lg:h-screen lg:self-start lg:overflow-y-auto lg:border-b-0 lg:border-r">
           <div className="flex h-full flex-col">
-            <div className="flex h-16 items-center gap-3 border-b px-4">
-              <div className="flex h-9 w-9 items-center justify-center rounded-md bg-primary text-primary-foreground">
-                <Database className="h-5 w-5" />
+            <div className="flex min-h-14 items-center gap-2 border-b px-2 py-2.5">
+              <div className="flex h-7 w-7 items-center justify-center rounded-md bg-primary text-primary-foreground">
+                <Network className="h-3.5 w-3.5" />
               </div>
-              <div>
-                <div className="text-sm font-semibold">CPA Nexus</div>
-                <div className="text-xs text-muted-foreground">Ops Console</div>
-              </div>
+              <div className="truncate text-[13px] font-semibold">CPA Nexus</div>
             </div>
-            <nav className="flex gap-1 overflow-x-auto p-2 lg:flex-col lg:overflow-visible">
+            <nav className="flex gap-1 overflow-x-auto p-1 lg:flex-col lg:overflow-visible">
               {navItems.map((item) => {
                 const Icon = item.icon;
                 return (
@@ -751,13 +861,13 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
                     key={item.id}
                     href={item.href}
                     className={cn(
-                      "flex h-9 min-w-max items-center gap-2 rounded-md px-2.5 text-sm transition-colors",
+                      "flex h-8 min-w-max items-center gap-1.5 rounded-md px-1.5 text-[12.5px] transition-colors",
                       activeSection === item.id
                         ? "bg-sidebar-accent text-sidebar-accent-foreground"
                         : "text-muted-foreground hover:bg-sidebar-accent/70 hover:text-foreground",
                     )}
                   >
-                    <Icon className="h-4 w-4" />
+                    <Icon className="h-3.5 w-3.5 shrink-0" />
                     {item.label}
                   </Link>
                 );
@@ -767,12 +877,12 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
         </aside>
 
         <main className="min-w-0">
-          <header className="flex min-h-16 flex-col justify-center gap-3 border-b bg-background/80 px-5 py-3 md:flex-row md:items-center md:justify-between">
+          <header className="flex min-h-14 flex-col justify-center gap-2 border-b bg-background/80 px-3 py-2.5 md:flex-row md:items-center md:justify-between">
             <div>
               <h1 className="text-xl font-semibold">{activeLabel}</h1>
             </div>
             <div className="flex flex-wrap items-center gap-2">
-              <Button size="sm" title={syncButtonTitle} onClick={() => void runJob("sync-cpa-instances")}>
+              <Button size="sm" title={syncButtonTitle} onClick={() => void runJob(syncJobKey)}>
                 <RefreshCw className="h-4 w-4" />
                 {syncButtonLabel}
               </Button>
@@ -783,7 +893,7 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
             </div>
           </header>
 
-          <div className="space-y-5 p-5">
+          <div className="space-y-3 p-3">
             {message ? (
               <div className="rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-sm text-sky-900">
                 {message}
@@ -823,7 +933,6 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
                 groups={authGroups}
                 quotaGroups={quotaGroups}
                 proxies={proxies}
-                backupAccounts={backupAccounts}
                 updatingCpaIds={updatingCpaIds}
                 nowMs={nowMs}
                 onDeleteAuthFile={deleteAuthFile}
@@ -831,31 +940,14 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
                 onToggleAuthFileDisabled={toggleAuthFileDisabled}
                 onConfigureAuthFileProxy={configureAuthFileProxy}
                 onRefreshAuthFileQuota={refreshAuthFileQuota}
-                onReplenish={replenishCpaAccounts}
+                onRtLoginAccount={rtLoginCpaAccount}
+                onUploadRtLoginAccounts={uploadRtLoginCpaAccounts}
                 onBatchHandleExceptionAuthFiles={batchHandleExceptionAuthFiles}
                 onAutoAssignCpaProxies={autoAssignCpaProxies}
                 onRefreshCpa={refreshCpaInstance}
                 onStartCodexOAuth={startCodexOAuthLogin}
                 onSubmitCodexOAuthCallback={submitCodexOAuthCallback}
               />
-            ) : null}
-
-            {activeSection === "strategies" ? (
-              <StrategiesSection
-                rows={strategies}
-                onSave={async (strategy) => {
-                  await mutate("/api/strategies", {
-                    method: "PUT",
-                    body: JSON.stringify(strategy),
-                  });
-                  setMessage("补号策略已保存");
-                  await loadAll();
-                }}
-              />
-            ) : null}
-
-            {activeSection === "replenishment-records" ? (
-              <ReplenishmentRecordsSection records={replenishmentRecords} />
             ) : null}
 
             {activeSection === "proxies" ? (
@@ -892,6 +984,8 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
               <JobsSection
                 jobs={jobs}
                 runs={runs}
+                runsPagination={runsPagination}
+                onRunsPageChange={(page) => loadAll({ runsPage: page })}
                 onRun={runJob}
                 onSave={async (job) => {
                   await mutate(`/api/jobs/${encodeURIComponent(job.key)}`, {
@@ -904,25 +998,6 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
               />
             ) : null}
 
-            {activeSection === "backups" ? (
-              <BackupAccountsSection
-                accounts={backupAccounts}
-                text={backupText}
-                setText={setBackupText}
-                onSubmit={importBackupAccounts}
-                onDelete={async (id) => {
-                  await mutate(`/api/backup-accounts?id=${id}`, { method: "DELETE" });
-                  await loadAll();
-                }}
-                onClear={async (id) => {
-                  await mutate("/api/backup-accounts", {
-                    method: "PATCH",
-                    body: JSON.stringify({ id, clearAssignment: true }),
-                  });
-                  await loadAll();
-                }}
-              />
-            ) : null}
           </div>
         </main>
       </div>
@@ -964,6 +1039,10 @@ function formatSyncButtonTitle(
     : "等待调度信息";
 }
 
+function sleep(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
 function InstancesSection(props: {
   instances: CpaInstance[];
   form: typeof emptyInstance;
@@ -978,11 +1057,11 @@ function InstancesSection(props: {
 }) {
   const formId = "cpa-instance-form";
   return (
-    <section className="space-y-5">
-      <div className="flex flex-col gap-3 rounded-md border bg-card p-4 sm:flex-row sm:items-center sm:justify-between">
+    <section className="space-y-3">
+      <div className="flex flex-col gap-2.5 rounded-md border bg-card p-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <div className="font-medium">CPA 实例</div>
-          <div className="text-sm text-muted-foreground">集中管理 CPA 地址、管理密码和配额刷新策略。</div>
+          <div className="text-sm text-muted-foreground">集中管理 CPA 地址、管理密码和配额刷新配置。</div>
         </div>
         <Button
           type="button"
@@ -1091,11 +1170,35 @@ function InstancesSection(props: {
   );
 }
 
+type RtLoginRowStatus = "waiting" | "logging-in" | "success" | "failed";
+
+type RtLoginUiRow = {
+  id: string;
+  lineNumber: number;
+  sourceLine: string;
+  email: string | null;
+  refreshToken: string;
+  proxyId: number | null;
+  proxyName: string | null;
+  status: RtLoginRowStatus;
+  error: string | null;
+  result: RtLoginAuthResult | null;
+};
+
+type RtLoginDialogState = {
+  instance: CpaInstance;
+  mode: RtLoginMode;
+  proxyMode: RtLoginProxyMode;
+  text: string;
+  stage: "input" | "processing" | "review" | "uploading";
+  error: string | null;
+  rows: RtLoginUiRow[];
+};
+
 function AuthFilesSection({
   groups,
   quotaGroups,
   proxies,
-  backupAccounts,
   updatingCpaIds,
   nowMs,
   onDeleteAuthFile,
@@ -1103,7 +1206,8 @@ function AuthFilesSection({
   onToggleAuthFileDisabled,
   onConfigureAuthFileProxy,
   onRefreshAuthFileQuota,
-  onReplenish,
+  onRtLoginAccount,
+  onUploadRtLoginAccounts,
   onBatchHandleExceptionAuthFiles,
   onAutoAssignCpaProxies,
   onRefreshCpa,
@@ -1113,7 +1217,6 @@ function AuthFilesSection({
   groups: Array<{ instance: CpaInstance; authFiles: AuthFile[] }>;
   quotaGroups: Array<{ instance: CpaInstance; quotas: QuotaSnapshot[] }>;
   proxies: ProxyRow[];
-  backupAccounts: BackupAccount[];
   updatingCpaIds: Set<number>;
   nowMs: number;
   onDeleteAuthFile: (id: number) => Promise<void>;
@@ -1121,13 +1224,24 @@ function AuthFilesSection({
   onToggleAuthFileDisabled: (id: number, disabled: boolean) => Promise<void>;
   onConfigureAuthFileProxy: (id: number, proxyUrl: string | null) => Promise<void>;
   onRefreshAuthFileQuota: (id: number) => Promise<void>;
-  onReplenish: (cpaInstanceId: number, payload: { count?: number; backupAccountIds?: number[] }) => Promise<void>;
+  onRtLoginAccount: (
+    cpaInstanceId: number,
+    mode: RtLoginMode,
+    line: string,
+    options?: RtLoginAccountOptions,
+  ) => Promise<RtLoginAuthResult>;
+  onUploadRtLoginAccounts: (
+    cpaInstanceId: number,
+    mode: RtLoginMode,
+    entries: RtLoginAuthResult[],
+  ) => Promise<RtLoginUploadResult | null>;
   onBatchHandleExceptionAuthFiles: (
     cpaInstanceId: number,
     action: BatchExceptionAction,
     authFileIds: number[],
     successVerb: string,
     subject: string,
+    target?: BatchAuthFileTarget,
   ) => Promise<void>;
   onAutoAssignCpaProxies: (cpaInstanceId: number) => Promise<void>;
   onRefreshCpa: (cpaInstanceId: number) => Promise<void>;
@@ -1136,11 +1250,12 @@ function AuthFilesSection({
 }) {
   const enabledGroups = onlyEnabledCpaGroups(groups);
   const enabledInstances = enabledGroups.map((group) => group.instance);
-  const replenishCandidates = backupAccounts.filter(
-    (account) => account.assignedCpaInstanceId === null && !account.exception,
-  );
   const proxyNameByUrl = useMemo(
     () => new Map(proxies.map((proxy) => [proxy.url, proxy.name])),
+    [proxies],
+  );
+  const enabledLoginProxies = useMemo(
+    () => proxies.filter((proxy) => proxy.enabled),
     [proxies],
   );
   const [deleteTarget, setDeleteTarget] = useState<AuthFileQuotaRow | null>(null);
@@ -1148,10 +1263,8 @@ function AuthFilesSection({
   const [moveTargetInstanceId, setMoveTargetInstanceId] = useState("");
   const [proxyTarget, setProxyTarget] = useState<AuthFileQuotaRow | null>(null);
   const [proxyTargetUrl, setProxyTargetUrl] = useState("");
-  const [openReplenishMenuInstanceId, setOpenReplenishMenuInstanceId] = useState<number | null>(null);
-  const [quickReplenishTarget, setQuickReplenishTarget] = useState<{ instance: CpaInstance; count: number } | null>(null);
-  const [manualReplenishInstance, setManualReplenishInstance] = useState<CpaInstance | null>(null);
-  const [manualSelectedBackupIds, setManualSelectedBackupIds] = useState<number[]>([]);
+  const [openLoginMenuInstanceId, setOpenLoginMenuInstanceId] = useState<number | null>(null);
+  const [rtLogin, setRtLogin] = useState<RtLoginDialogState | null>(null);
   const [oauthLogin, setOauthLogin] = useState<{
     instance: CpaInstance;
     authUrl: string | null;
@@ -1170,27 +1283,28 @@ function AuthFilesSection({
     subject: string;
     confirmVerb: string;
     successVerb: string;
+    target?: BatchAuthFileTarget;
   } | null>(null);
   const [useDesktopMasonry, setUseDesktopMasonry] = useState(false);
-  const replenishMenuRef = useRef<HTMLDivElement | null>(null);
+  const loginMenuRef = useRef<HTMLDivElement | null>(null);
   const bulkMenuRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    if (openReplenishMenuInstanceId === null) {
+    if (openLoginMenuInstanceId === null) {
       return;
     }
 
     function closeOnOutsidePointerDown(event: PointerEvent) {
       const target = event.target;
-      if (target instanceof Node && replenishMenuRef.current?.contains(target)) {
+      if (target instanceof Node && loginMenuRef.current?.contains(target)) {
         return;
       }
-      setOpenReplenishMenuInstanceId(null);
+      setOpenLoginMenuInstanceId(null);
     }
 
     document.addEventListener("pointerdown", closeOnOutsidePointerDown);
     return () => document.removeEventListener("pointerdown", closeOnOutsidePointerDown);
-  }, [openReplenishMenuInstanceId]);
+  }, [openLoginMenuInstanceId]);
 
   useEffect(() => {
     if (openBulkMenuInstanceId === null) {
@@ -1242,17 +1356,22 @@ function AuthFilesSection({
     ? enabledInstances.filter((instance) => instance.id !== moveTarget.cpaInstanceId)
     : [];
   const proxyOptions = proxyTarget ? proxiesForCpa(proxyTarget.cpaInstanceId) : [];
-  const quickReplenishHasEnough =
-    quickReplenishTarget !== null && replenishCandidates.length >= quickReplenishTarget.count;
 
-  function openManualReplenish(instance: CpaInstance) {
-    setOpenReplenishMenuInstanceId(null);
-    setManualReplenishInstance(instance);
-    setManualSelectedBackupIds([]);
+  function openRtLogin(instance: CpaInstance, mode: RtLoginMode) {
+    setOpenLoginMenuInstanceId(null);
+    setRtLogin({
+      instance,
+      mode,
+      proxyMode: defaultRtLoginProxyMode(enabledLoginProxies.length),
+      text: "",
+      stage: "input",
+      error: null,
+      rows: [],
+    });
   }
 
   function openOAuthLogin(instance: CpaInstance) {
-    setOpenReplenishMenuInstanceId(null);
+    setOpenLoginMenuInstanceId(null);
     setOauthLogin({
       instance,
       authUrl: null,
@@ -1328,10 +1447,159 @@ function AuthFilesSection({
     }
   }
 
-  function toggleManualBackupId(id: number, checked: boolean) {
-    setManualSelectedBackupIds((current) =>
-      checked ? [...current, id] : current.filter((selectedId) => selectedId !== id),
+  function updateRtLoginRow(rowId: string, patch: Partial<RtLoginUiRow>) {
+    setRtLogin((current) =>
+      current
+        ? {
+            ...current,
+            rows: current.rows.map((row) =>
+              row.id === rowId ? { ...row, ...patch } : row,
+            ),
+          }
+        : current,
     );
+  }
+
+  async function loginRtRow(instance: CpaInstance, mode: RtLoginMode, row: RtLoginUiRow) {
+    updateRtLoginRow(row.id, { status: "logging-in", error: null });
+    try {
+      const result = await onRtLoginAccount(instance.id, mode, row.sourceLine, {
+        proxyId: row.proxyId,
+      });
+      updateRtLoginRow(row.id, {
+        status: "success",
+        email: result.email,
+        refreshToken: result.refreshToken,
+        result,
+        error: null,
+      });
+    } catch (error) {
+      updateRtLoginRow(row.id, {
+        status: "failed",
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  async function runRtLoginRows(instance: CpaInstance, mode: RtLoginMode, rows: RtLoginUiRow[]) {
+    const proxyIds = [...new Set(rows.map((row) => row.proxyId).filter((id): id is number => id !== null))];
+    if (proxyIds.length > 0) {
+      await Promise.all(
+        proxyIds.map(async (proxyId) => {
+          for (const row of rows.filter((item) => item.proxyId === proxyId)) {
+            await loginRtRow(instance, mode, row);
+          }
+        }),
+      );
+    } else {
+      for (const row of rows) {
+        await loginRtRow(instance, mode, row);
+      }
+    }
+
+    setRtLogin((current) =>
+      current?.instance.id === instance.id && current.mode === mode
+        ? { ...current, stage: "review" }
+        : current,
+    );
+  }
+
+  function startRtLoginFlow() {
+    if (!rtLogin) {
+      return;
+    }
+
+    const parsed = parseRtLoginInput(rtLogin.text);
+    if (rtLogin.proxyMode === "pool" && enabledLoginProxies.length === 0) {
+      const message = "没有启用的代理可用于代理池登录";
+      setRtLogin((current) => current ? { ...current, error: message } : current);
+      toast.error(message);
+      return;
+    }
+
+    if (parsed.valid.length === 0 || parsed.invalid.length > 0) {
+      const invalidLines = parsed.invalid.map((item) => `第 ${item.lineNumber} 行`).join("、");
+      const message = parsed.valid.length === 0
+        ? "请输入至少一条有效 RT"
+        : `${invalidLines} 格式不正确，请确认每行包含 rt_ 开头的 refresh token`;
+      setRtLogin((current) => current ? { ...current, error: message } : current);
+      toast.error(message);
+      return;
+    }
+
+    const rows: RtLoginUiRow[] = parsed.valid.map((row, index) => {
+      const proxy = rtLogin.proxyMode === "pool"
+        ? enabledLoginProxies[index % enabledLoginProxies.length]
+        : null;
+      return {
+        id: `${row.lineNumber}-${row.refreshToken}`,
+        lineNumber: row.lineNumber,
+        sourceLine: row.sourceLine,
+        email: row.email,
+        refreshToken: row.refreshToken,
+        proxyId: proxy?.id ?? null,
+        proxyName: proxy ? rtLoginProxyLabel(proxy) : null,
+        status: "waiting",
+        error: null,
+        result: null,
+      };
+    });
+    setRtLogin({
+      ...rtLogin,
+      stage: "processing",
+      error: null,
+      rows,
+    });
+    void runRtLoginRows(rtLogin.instance, rtLogin.mode, rows);
+  }
+
+  async function retryRtLoginRow(row: RtLoginUiRow) {
+    if (!rtLogin) {
+      return;
+    }
+
+    const { instance, mode } = rtLogin;
+    setRtLogin((current) => current ? { ...current, stage: "processing" } : current);
+    await loginRtRow(instance, mode, row);
+    setRtLogin((current) => {
+      if (!current) {
+        return current;
+      }
+
+      const finished = current.rows.every((item) => item.status === "success" || item.status === "failed");
+      return finished ? { ...current, stage: "review" } : current;
+    });
+  }
+
+  async function uploadRtLoginSuccessRows() {
+    if (!rtLogin) {
+      return;
+    }
+
+    const entries = rtLogin.rows
+      .map((row) => row.result)
+      .filter((row): row is RtLoginAuthResult => row !== null);
+    if (entries.length === 0) {
+      toast.error("没有登录成功的账号可添加");
+      return;
+    }
+
+    setRtLogin((current) => current ? { ...current, stage: "uploading", error: null } : current);
+    try {
+      const result = await onUploadRtLoginAccounts(rtLogin.instance.id, rtLogin.mode, entries);
+      const uploaded = result?.uploaded ?? entries.length;
+      const failed = result?.failed ?? 0;
+      if (failed > 0) {
+        toast.warning(`已添加 ${uploaded} 个账号，${failed} 个上传失败`);
+      } else {
+        toast.success(`已添加 ${uploaded} 个账号`);
+      }
+      setRtLogin(null);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setRtLogin((current) => current ? { ...current, stage: "review", error: message } : current);
+      toast.error(message);
+    }
   }
 
   const groupColumns =
@@ -1348,6 +1616,10 @@ function AuthFilesSection({
           const exceptionAuthFileIds = exceptionRows.map((row) => row.id);
           const disabledRows = rows.filter((row) => row.disabled);
           const disabledAuthFileIds = disabledRows.map((row) => row.id);
+          const freeRows = rows.filter((row) => isFreeSubscriptionType(row.subscriptionType));
+          const activeFreeRows = activeRows.filter((row) => isFreeSubscriptionType(row.subscriptionType));
+          const freeAuthFileIds = freeRows.map((row) => row.id);
+          const activeFreeAuthFileIds = activeFreeRows.map((row) => row.id);
           const disabledCount = disabledRows.length;
           const exceptionCount = exceptionRows.length;
           const availableCount = activeRows.filter((row) => row.quotaStatus === "available").length;
@@ -1356,7 +1628,7 @@ function AuthFilesSection({
           const averageWeekRemaining = averageRemainingPercent(activeRows.map((row) => row.usageWeekPercent));
           const isUpdating = updatingCpaIds.has(group.instance.id);
           const hasOpenHeaderMenu =
-            openReplenishMenuInstanceId === group.instance.id ||
+            openLoginMenuInstanceId === group.instance.id ||
             openBulkMenuInstanceId === group.instance.id;
 
           return (
@@ -1368,8 +1640,8 @@ function AuthFilesSection({
                 hasOpenHeaderMenu ? "z-50 overflow-visible" : "overflow-hidden",
               )}
             >
-              <div className="flex flex-wrap items-center justify-between gap-2 border-b bg-muted/35 px-3 py-2">
-                <div className="flex min-w-0 items-center gap-2">
+              <div className="space-y-2 border-b bg-muted/35 px-3 py-2">
+                <div className="flex min-w-0 flex-wrap items-center gap-2">
                   <a
                     href={buildCpaManagementHref(group.instance.baseUrl)}
                     target="_blank"
@@ -1390,48 +1662,40 @@ function AuthFilesSection({
                   >
                     <RefreshCw className={cn("h-3.5 w-3.5", isUpdating && "animate-spin")} />
                   </Button>
-                  <div ref={openReplenishMenuInstanceId === group.instance.id ? replenishMenuRef : null} className="relative">
+                  <div ref={openLoginMenuInstanceId === group.instance.id ? loginMenuRef : null} className="relative">
                     <Button
                       type="button"
                       size="xs"
                       variant="outline"
-                      aria-expanded={openReplenishMenuInstanceId === group.instance.id}
+                      aria-expanded={openLoginMenuInstanceId === group.instance.id}
                       onClick={() =>
-                        setOpenReplenishMenuInstanceId(
-                          openReplenishMenuInstanceId === group.instance.id ? null : group.instance.id,
+                        setOpenLoginMenuInstanceId(
+                          openLoginMenuInstanceId === group.instance.id ? null : group.instance.id,
                         )
                       }
                     >
                       <Plus className="h-3 w-3" />
                       补号
                     </Button>
-                    {openReplenishMenuInstanceId === group.instance.id ? (
+                    {openLoginMenuInstanceId === group.instance.id ? (
                       <div className="absolute left-0 top-8 z-[60] min-w-32 rounded-md border bg-popover p-1 text-popover-foreground shadow-md">
-                        {[1, 5, 10].map((count) => {
-                          const disabled = replenishCandidates.length < count;
-                          return (
-                            <button
-                              key={count}
-                              type="button"
-                              disabled={disabled}
-                              title={disabled ? `替补号池可用 ${replenishCandidates.length} 个，不足 ${count} 个` : undefined}
-                              className="flex w-full items-center rounded px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-45"
-                              onClick={() => {
-                                setOpenReplenishMenuInstanceId(null);
-                                setQuickReplenishTarget({ instance: group.instance, count });
-                              }}
-                            >
-                              补 {count} 个
-                            </button>
-                          );
-                        })}
                         <button
                           type="button"
-                          className="flex w-full items-center rounded px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground"
-                          onClick={() => openManualReplenish(group.instance)}
+                          className="flex w-full items-center gap-1.5 rounded px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground"
+                          onClick={() => openRtLogin(group.instance, "rt")}
                         >
-                          手动选择
+                          <LogIn className="h-3 w-3" />
+                          RT登录
                         </button>
+                        <button
+                          type="button"
+                          className="flex w-full items-center gap-1.5 rounded px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground"
+                          onClick={() => openRtLogin(group.instance, "mobile_rt")}
+                        >
+                          <LogIn className="h-3 w-3" />
+                          Mobile RT登录
+                        </button>
+                        <Separator className="my-1" />
                         <button
                           type="button"
                           className="flex w-full items-center gap-1.5 rounded px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground"
@@ -1513,6 +1777,50 @@ function AuthFilesSection({
                         >
                           批量停用异常账号
                         </button>
+                        <Separator className="my-1" />
+                        <button
+                          type="button"
+                          disabled={freeAuthFileIds.length === 0}
+                          title={freeAuthFileIds.length === 0 ? "暂无 Free 号" : undefined}
+                          className="flex w-full items-center rounded px-2 py-1.5 text-left text-xs text-rose-700 hover:bg-rose-50 hover:text-rose-800 disabled:pointer-events-none disabled:opacity-45"
+                          onClick={() => {
+                            setOpenBulkMenuInstanceId(null);
+                            setBulkExceptionTarget({
+                              instance: group.instance,
+                              action: "delete",
+                              authFileIds: freeAuthFileIds,
+                              title: "批量清理Free号",
+                              subject: "Free号",
+                              confirmVerb: "清理",
+                              successVerb: "已清理",
+                              target: "free",
+                            });
+                          }}
+                        >
+                          批量清理Free号
+                        </button>
+                        <button
+                          type="button"
+                          disabled={activeFreeAuthFileIds.length === 0}
+                          title={activeFreeAuthFileIds.length === 0 ? "暂无可停用 Free 号" : undefined}
+                          className="flex w-full items-center rounded px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-45"
+                          onClick={() => {
+                            setOpenBulkMenuInstanceId(null);
+                            setBulkExceptionTarget({
+                              instance: group.instance,
+                              action: "disable",
+                              authFileIds: activeFreeAuthFileIds,
+                              title: "批量停用Free号",
+                              subject: "Free号",
+                              confirmVerb: "停用",
+                              successVerb: "已停用",
+                              target: "free",
+                            });
+                          }}
+                        >
+                          批量停用Free号
+                        </button>
+                        <Separator className="my-1" />
                         <button
                           type="button"
                           disabled={disabledAuthFileIds.length === 0}
@@ -1537,9 +1845,9 @@ function AuthFilesSection({
                     ) : null}
                   </div>
                 </div>
-                <div className="flex flex-wrap items-center justify-end gap-x-2 gap-y-1 text-xs text-muted-foreground">
-                  <HeaderAverageMeter label="5h均剩余" value={average5hRemaining} tone="sky" />
-                  <HeaderAverageMeter label="周均剩余" value={averageWeekRemaining} tone="emerald" />
+                <div className="flex w-full flex-wrap items-center gap-x-2 gap-y-1 border-t border-border/50 pt-1.5 text-xs text-muted-foreground">
+                  <HeaderAverageMeter label="5h均剩余" value={average5hRemaining} />
+                  <HeaderAverageMeter label="周均剩余" value={averageWeekRemaining} />
                   <span className="text-emerald-700">{availableCount} 可用</span>
                   {limitedRows.length > 0 ? <span className="text-amber-700">{limitedRows.length} 限额</span> : null}
                   {disabledCount > 0 ? <span>{disabledCount} 停用</span> : null}
@@ -1709,126 +2017,199 @@ function AuthFilesSection({
         </DialogContent>
       </Dialog>
 
-      <Dialog open={quickReplenishTarget !== null} onOpenChange={(open) => !open && setQuickReplenishTarget(null)}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>确认补号</DialogTitle>
-            <DialogDescription>
-              确认给 {quickReplenishTarget?.instance.name ?? "这个 CPA"} 补入 {quickReplenishTarget?.count ?? 0} 个账号吗？当前替补号池可用 {replenishCandidates.length} 个。
-            </DialogDescription>
-          </DialogHeader>
-          {quickReplenishTarget && !quickReplenishHasEnough ? (
-            <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
-              替补号池数量不足，无法执行本次快捷补号。
-            </div>
-          ) : null}
-          <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => setQuickReplenishTarget(null)}>
-              取消
-            </Button>
-            <Button
-              type="button"
-              disabled={!quickReplenishTarget || !quickReplenishHasEnough}
-              onClick={() => {
-                if (!quickReplenishTarget || !quickReplenishHasEnough) {
-                  return;
-                }
-                const { instance, count } = quickReplenishTarget;
-                setQuickReplenishTarget(null);
-                void onReplenish(instance.id, { count });
-              }}
-            >
-              确认补入
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
       <Dialog
-        open={manualReplenishInstance !== null}
+        open={rtLogin !== null}
         onOpenChange={(open) => {
-          if (!open) {
-            setManualReplenishInstance(null);
-            setManualSelectedBackupIds([]);
+          if (!open && rtLogin?.stage !== "processing" && rtLogin?.stage !== "uploading") {
+            setRtLogin(null);
           }
         }}
       >
         <DialogContent className="sm:max-w-3xl">
           <DialogHeader>
-            <DialogTitle>手动补号</DialogTitle>
+            <DialogTitle>{rtLogin ? rtLoginModeLabel(rtLogin.mode) : "RT登录"}</DialogTitle>
             <DialogDescription>
-              选择要补进 {manualReplenishInstance?.name ?? "目标 CPA"} 的替补账号。
+              {rtLogin?.instance.name ?? "当前 CPA"} 的 RT 登录。
             </DialogDescription>
           </DialogHeader>
-          <div className="max-h-[58vh] overflow-auto rounded-md border">
-            <table className="w-full caption-bottom text-sm">
-              <TableHeader>
-                <TableRow>
-                  <TableHead className="w-10 px-3 py-2"></TableHead>
-                  <TableHead className="px-3 py-2">邮箱</TableHead>
-                  <TableHead className="px-3 py-2">状态</TableHead>
-                  <TableHead className="px-3 py-2">异常</TableHead>
-                  <TableHead className="px-3 py-2 text-right">导入时间</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {replenishCandidates.length === 0 ? (
+          {rtLogin?.stage === "input" ? (
+            <div className="grid gap-3">
+              <div className="grid gap-2">
+                <Label>登录方式</Label>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button
+                    type="button"
+                    size="xs"
+                    variant="ghost"
+                    className={cn(
+                      "h-9 rounded-full border px-4 text-sm font-semibold shadow-none",
+                      rtLogin.proxyMode === "none"
+                        ? "border-neutral-950 bg-neutral-950 text-white hover:bg-neutral-900 hover:text-white"
+                        : "border-border bg-background text-muted-foreground hover:bg-muted/60 hover:text-foreground",
+                    )}
+                    onClick={() =>
+                      setRtLogin((current) =>
+                        current ? { ...current, proxyMode: "none", error: null } : current,
+                      )
+                    }
+                  >
+                    不使用代理池
+                  </Button>
+                  <Button
+                    type="button"
+                    size="xs"
+                    variant="ghost"
+                    disabled={enabledLoginProxies.length === 0}
+                    title={enabledLoginProxies.length === 0 ? "暂无启用代理" : undefined}
+                    className={cn(
+                      "h-9 rounded-full border px-4 text-sm font-semibold shadow-none disabled:opacity-45",
+                      rtLogin.proxyMode === "pool"
+                        ? "border-neutral-950 bg-neutral-950 text-white hover:bg-neutral-900 hover:text-white"
+                        : "border-border bg-background text-muted-foreground hover:bg-muted/60 hover:text-foreground",
+                    )}
+                    onClick={() =>
+                      setRtLogin((current) =>
+                        current ? { ...current, proxyMode: "pool", error: null } : current,
+                      )
+                    }
+                  >
+                    <Network className="h-3.5 w-3.5" />
+                    用代理池登录
+                  </Button>
+                  {rtLogin.proxyMode === "pool" ? (
+                    <Badge variant="outline">{enabledLoginProxies.length} 个代理</Badge>
+                  ) : null}
+                </div>
+              </div>
+              <Label htmlFor="rt-login-input">RT 列表</Label>
+              <Textarea
+                id="rt-login-input"
+                value={rtLogin.text}
+                placeholder="一行一条，可以是邮箱----密码----x----rt_xxx，也可以只有 rt_xxx"
+                className={cn("min-h-44 font-mono text-xs", rtLogin.error && "border-rose-300 focus-visible:border-rose-400 focus-visible:ring-rose-200")}
+                onChange={(event) =>
+                  setRtLogin((current) =>
+                    current ? { ...current, text: event.target.value, error: null } : current,
+                  )
+                }
+              />
+              {rtLogin.error ? (
+                <div className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-900">
+                  {rtLogin.error}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+          {rtLogin && rtLogin.stage !== "input" ? (
+            <div className="max-h-[58vh] overflow-auto rounded-md border">
+              <table className="w-full caption-bottom text-sm">
+                <TableHeader>
                   <TableRow>
-                    <TableCell colSpan={5} className="h-20 text-center text-muted-foreground">
-                      暂无可补的替补账号
-                    </TableCell>
+                    <TableHead className="w-14 px-3 py-2">行</TableHead>
+                    <TableHead className="px-3 py-2">账号</TableHead>
+                    {rtLogin.rows.some((row) => row.proxyId !== null) ? (
+                      <TableHead className="px-3 py-2">代理</TableHead>
+                    ) : null}
+                    <TableHead className="px-3 py-2">状态</TableHead>
+                    <TableHead className="px-3 py-2">订阅</TableHead>
+                    <TableHead className="px-3 py-2 text-right">操作</TableHead>
                   </TableRow>
-                ) : (
-                  replenishCandidates.map((account) => (
-                    <TableRow key={account.id}>
-                      <TableCell className="px-3 py-2">
-                        <Checkbox
-                          checked={manualSelectedBackupIds.includes(account.id)}
-                          onCheckedChange={(checked) => toggleManualBackupId(account.id, checked === true)}
-                        />
+                </TableHeader>
+                <TableBody>
+                  {rtLogin.rows.map((row) => (
+                    <TableRow key={row.id}>
+                      <TableCell className="px-3 py-2 text-muted-foreground">#{row.lineNumber}</TableCell>
+                      <TableCell className="max-w-[280px] px-3 py-2">
+                        <div className="truncate font-medium" title={row.result?.email ?? row.email ?? row.sourceLine}>
+                          {row.result?.email ?? row.email ?? maskRefreshToken(row.refreshToken)}
+                        </div>
+                        <div className="truncate text-xs text-muted-foreground" title={row.result?.fileName ?? row.sourceLine}>
+                          {row.result?.fileName ?? row.sourceLine}
+                        </div>
                       </TableCell>
-                      <TableCell className="px-3 py-2 font-medium">{account.email}</TableCell>
-                      <TableCell className="px-3 py-2">{account.status}</TableCell>
-                      <TableCell className="max-w-[220px] px-3 py-2">
-                        <span className="block truncate text-muted-foreground" title={account.exception ?? "无异常"}>
-                          {account.exception ?? "无异常"}
+                      {rtLogin.rows.some((item) => item.proxyId !== null) ? (
+                        <TableCell className="max-w-[160px] px-3 py-2">
+                          <div className="truncate text-xs text-muted-foreground" title={row.proxyName ?? undefined}>
+                            {row.proxyName ?? "-"}
+                          </div>
+                        </TableCell>
+                      ) : null}
+                      <TableCell className="max-w-[240px] px-3 py-2">
+                        <span
+                          title={row.error ?? undefined}
+                          className={cn("inline-flex items-center gap-1.5 text-xs font-medium", rtLoginStatusClass(row.status))}
+                        >
+                          {row.status === "logging-in" ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
+                          {rtLoginStatusLabel(row.status)}
                         </span>
+                        {row.error ? (
+                          <span className="ml-2 inline-block max-w-[150px] truncate align-bottom text-xs text-muted-foreground" title={row.error}>
+                            {row.error}
+                          </span>
+                        ) : null}
                       </TableCell>
-                      <TableCell className="whitespace-nowrap px-3 py-2 text-right text-muted-foreground">
-                        {formatDate(account.importedAt)}
+                      <TableCell className="px-3 py-2">
+                        {row.result ? <SubscriptionBadge value={row.result.planType} /> : <span className="text-muted-foreground">-</span>}
+                      </TableCell>
+                      <TableCell className="px-3 py-2 text-right">
+                        {row.status === "failed" ? (
+                          <Button
+                            type="button"
+                            size="xs"
+                            variant="outline"
+                            disabled={rtLogin.stage !== "review"}
+                            onClick={() => void retryRtLoginRow(row)}
+                          >
+                            <RefreshCw className="h-3 w-3" />
+                            重试
+                          </Button>
+                        ) : null}
                       </TableCell>
                     </TableRow>
-                  ))
-                )}
-              </TableBody>
-            </table>
-          </div>
+                  ))}
+                </TableBody>
+              </table>
+            </div>
+          ) : null}
+          {rtLogin?.error && rtLogin.stage !== "input" ? (
+            <div className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-900">
+              {rtLogin.error}
+            </div>
+          ) : null}
           <DialogFooter>
             <Button
               type="button"
               variant="outline"
-              onClick={() => {
-                setManualReplenishInstance(null);
-                setManualSelectedBackupIds([]);
-              }}
+              disabled={rtLogin?.stage === "processing" || rtLogin?.stage === "uploading"}
+              onClick={() => setRtLogin(null)}
             >
               取消
             </Button>
             <Button
               type="button"
-              disabled={!manualReplenishInstance || manualSelectedBackupIds.length === 0}
+              disabled={
+                !rtLogin ||
+                rtLogin.stage === "processing" ||
+                rtLogin.stage === "uploading" ||
+                (rtLogin.stage === "review" && rtLogin.rows.every((row) => row.status !== "success"))
+              }
               onClick={() => {
-                if (!manualReplenishInstance || manualSelectedBackupIds.length === 0) {
+                if (!rtLogin) {
                   return;
                 }
-                const targetInstanceId = manualReplenishInstance.id;
-                const backupAccountIds = manualSelectedBackupIds;
-                setManualReplenishInstance(null);
-                setManualSelectedBackupIds([]);
-                void onReplenish(targetInstanceId, { backupAccountIds });
+                if (rtLogin.stage === "input") {
+                  startRtLoginFlow();
+                  return;
+                }
+                if (rtLogin.stage === "review") {
+                  void uploadRtLoginSuccessRows();
+                }
               }}
             >
-              确认补入 {manualSelectedBackupIds.length}
+              {rtLogin?.stage === "processing" || rtLogin?.stage === "uploading" ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : null}
+              {rtLoginConfirmLabel(rtLogin)}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1979,6 +2360,7 @@ function AuthFilesSection({
                   target.authFileIds,
                   target.successVerb,
                   target.subject,
+                  target.target,
                 );
               }}
             >
@@ -2005,6 +2387,8 @@ type AuthFileQuotaRow = {
   subscriptionType: string | null;
   usage5hPercent: number | null;
   usageWeekPercent: number | null;
+  usage5hResetAt: string | null;
+  usageWeekResetAt: string | null;
   exception: string | null;
   refreshedAt: string;
 };
@@ -2055,21 +2439,36 @@ function CompactAuthFileTable({
 
   return (
     <div className="overflow-x-auto">
-      <div className="max-h-[calc(100vh-260px)] min-w-[760px] overflow-y-auto">
-        <table className="w-full caption-bottom text-sm">
+      <div
+        className="max-h-[calc(100vh-260px)] max-w-none overflow-y-auto"
+        style={{ width: 704, minWidth: 704, maxWidth: 704 }}
+      >
+        <table
+          className="table-fixed caption-bottom text-sm"
+          style={{ width: 704, minWidth: 704, maxWidth: 704 }}
+        >
+          <colgroup>
+            <col style={{ width: 260 }} />
+            <col style={{ width: 96 }} />
+            <col style={{ width: 96 }} />
+            <col style={{ width: 64 }} />
+            <col style={{ width: 64 }} />
+            <col style={{ width: 80 }} />
+            <col style={{ width: 44 }} />
+          </colgroup>
           <TableHeader>
             <TableRow className="h-8">
-              <TableHead className="sticky top-0 z-10 bg-card px-3 py-1 text-xs shadow-[0_1px_0_var(--border)]">账号</TableHead>
-              <TableHead className="sticky top-0 z-10 bg-card px-2 py-1 text-xs shadow-[0_1px_0_var(--border)]">代理</TableHead>
-              <TableHead className="sticky top-0 z-10 w-32 bg-card px-2 py-1 text-xs shadow-[0_1px_0_var(--border)]">
+              <TableHead className="sticky top-0 z-10 w-[260px] bg-card px-3 py-1 text-xs shadow-[0_1px_0_var(--border)]">账号</TableHead>
+              <TableHead className="sticky top-0 z-10 w-24 bg-card px-2 py-1 text-xs shadow-[0_1px_0_var(--border)]">
                 <CompactPercentHeader windowLabel="5h" />
               </TableHead>
-              <TableHead className="sticky top-0 z-10 w-32 bg-card px-2 py-1 text-xs shadow-[0_1px_0_var(--border)]">
+              <TableHead className="sticky top-0 z-10 w-24 bg-card px-2 py-1 text-xs shadow-[0_1px_0_var(--border)]">
                 <CompactPercentHeader windowLabel="周" />
               </TableHead>
-              <TableHead className="sticky top-0 z-10 bg-card px-2 py-1 text-xs shadow-[0_1px_0_var(--border)]">状态</TableHead>
-              <TableHead className="sticky top-0 z-10 bg-card px-3 py-1 text-right text-xs shadow-[0_1px_0_var(--border)]">刷新</TableHead>
-              <TableHead className="sticky top-0 z-10 bg-card px-3 py-1 text-right text-xs shadow-[0_1px_0_var(--border)]">操作</TableHead>
+              <TableHead className="sticky top-0 z-10 w-16 bg-card px-2 py-1 text-xs shadow-[0_1px_0_var(--border)]">代理</TableHead>
+              <TableHead className="sticky top-0 z-10 w-16 bg-card px-2 py-1 text-xs shadow-[0_1px_0_var(--border)]">状态</TableHead>
+              <TableHead className="sticky top-0 z-10 w-20 bg-card px-2 py-1 text-xs shadow-[0_1px_0_var(--border)]">刷新</TableHead>
+              <TableHead className="sticky top-0 z-10 w-11 bg-card px-2 py-1 text-right text-xs shadow-[0_1px_0_var(--border)]">操作</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -2085,7 +2484,7 @@ function CompactAuthFileTable({
                   key={row.id}
                   className={cn("h-9", row.disabled && "bg-muted/30 text-muted-foreground")}
                 >
-                  <TableCell className="max-w-[190px] px-3 py-1">
+                  <TableCell className="w-[260px] max-w-[260px] px-3 py-1">
                     <div className="flex min-w-0 items-center gap-2">
                       <span
                         className={cn(
@@ -2100,11 +2499,6 @@ function CompactAuthFileTable({
                         )}
                       />
                       <SubscriptionBadge value={row.subscriptionType} />
-                      {row.disabled ? (
-                        <Badge variant="outline" className="border-muted-foreground/25 text-muted-foreground">
-                          停用
-                        </Badge>
-                      ) : null}
                       <HoverCopyTooltip
                         className="min-w-0 flex-1"
                         items={accountTooltipItems(row)}
@@ -2115,9 +2509,15 @@ function CompactAuthFileTable({
                       </HoverCopyTooltip>
                     </div>
                   </TableCell>
-                  <TableCell className="px-2 py-1">
+                  <TableCell className="w-24 px-2 py-1">
+                    <CompactPercentBar value={row.usage5hPercent} resetAt={row.usage5hResetAt} nowMs={nowMs} />
+                  </TableCell>
+                  <TableCell className="w-24 px-2 py-1">
+                    <CompactPercentBar value={row.usageWeekPercent} resetAt={row.usageWeekResetAt} nowMs={nowMs} />
+                  </TableCell>
+                  <TableCell className="w-16 px-2 py-1">
                     <HoverCopyTooltip
-                      className="block max-w-[140px]"
+                      className="block max-w-12"
                       items={proxyTooltipItems(row)}
                     >
                       <span className="block truncate text-xs text-muted-foreground">
@@ -2125,13 +2525,7 @@ function CompactAuthFileTable({
                       </span>
                     </HoverCopyTooltip>
                   </TableCell>
-                  <TableCell className="px-2 py-1">
-                    <CompactPercentBar value={row.usage5hPercent} tone="sky" />
-                  </TableCell>
-                  <TableCell className="px-2 py-1">
-                    <CompactPercentBar value={row.usageWeekPercent} tone="emerald" />
-                  </TableCell>
-                  <TableCell className="max-w-[260px] px-2 py-1">
+                  <TableCell className="w-16 px-2 py-1">
                     <span
                       title={row.quotaStatusLabel}
                       className={cn(
@@ -2146,12 +2540,12 @@ function CompactAuthFileTable({
                       {row.quotaStatusLabel}
                     </span>
                   </TableCell>
-                  <TableCell className="whitespace-nowrap px-3 py-1 text-right text-xs text-muted-foreground">
+                  <TableCell className="w-20 whitespace-nowrap px-2 py-1 text-xs text-muted-foreground">
                     <span title={formatDate(row.refreshedAt)}>
                       {formatRelativeTime(row.refreshedAt, nowMs)}
                     </span>
                   </TableCell>
-                  <TableCell className="whitespace-nowrap px-3 py-1 text-right">
+                  <TableCell className="w-11 whitespace-nowrap px-2 py-1 text-right">
                     <div
                       className="relative flex justify-end"
                     >
@@ -2401,10 +2795,103 @@ function compactTooltipItems(items: Array<{ label: string; value: string }>) {
   });
 }
 
+const rtLoginEmailRegex = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
+const rtLoginRefreshTokenRegex = /\brt_[A-Za-z0-9._-]+/;
+
+function parseRtLoginInput(text: string) {
+  const valid: Array<{
+    lineNumber: number;
+    sourceLine: string;
+    email: string | null;
+    refreshToken: string;
+  }> = [];
+  const invalid: Array<{ lineNumber: number; sourceLine: string }> = [];
+
+  text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .forEach((line, index) => {
+      if (!line) {
+        return;
+      }
+
+      const segments = line.split("----").map((segment) => segment.trim());
+      const refreshToken =
+        segments.find((segment) => rtLoginRefreshTokenRegex.test(segment))?.match(rtLoginRefreshTokenRegex)?.[0] ??
+        line.match(rtLoginRefreshTokenRegex)?.[0] ??
+        "";
+      if (!refreshToken) {
+        invalid.push({ lineNumber: index + 1, sourceLine: line });
+        return;
+      }
+
+      valid.push({
+        lineNumber: index + 1,
+        sourceLine: line,
+        email: line.match(rtLoginEmailRegex)?.[0] ?? null,
+        refreshToken,
+      });
+    });
+
+  return { valid, invalid };
+}
+
+function rtLoginModeLabel(mode: RtLoginMode) {
+  return mode === "mobile_rt" ? "Mobile RT登录" : "RT登录";
+}
+
+function rtLoginProxyLabel(proxy: ProxyRow) {
+  return proxy.name.trim() || proxy.url;
+}
+
+function rtLoginStatusLabel(status: RtLoginRowStatus) {
+  const labels: Record<RtLoginRowStatus, string> = {
+    waiting: "等待中",
+    "logging-in": "正在登录中",
+    success: "登录成功",
+    failed: "登录失败",
+  };
+  return labels[status];
+}
+
+function rtLoginStatusClass(status: RtLoginRowStatus) {
+  const classes: Record<RtLoginRowStatus, string> = {
+    waiting: "text-muted-foreground",
+    "logging-in": "text-sky-700",
+    success: "text-emerald-700",
+    failed: "text-rose-700",
+  };
+  return classes[status];
+}
+
+function rtLoginConfirmLabel(state: RtLoginDialogState | null) {
+  if (!state) {
+    return "确认";
+  }
+  if (state.stage === "processing") {
+    return "正在登录";
+  }
+  if (state.stage === "uploading") {
+    return "正在添加";
+  }
+  if (state.stage === "review") {
+    const count = state.rows.filter((row) => row.status === "success").length;
+    return `确认添加 ${count} 个`;
+  }
+  return "确认并开始登录";
+}
+
+function maskRefreshToken(value: string) {
+  if (value.length <= 14) {
+    return value;
+  }
+  return `${value.slice(0, 8)}...${value.slice(-4)}`;
+}
+
 function CompactPercentHeader({ windowLabel }: { windowLabel: string }) {
   return (
-    <div className="grid min-w-28 grid-cols-[2.75rem_1fr] items-center gap-2">
-      <span className="text-right">{windowLabel}</span>
+    <div className="flex w-[4.5rem] items-center gap-1">
+      <span>{windowLabel}</span>
       <span>剩余</span>
     </div>
   );
@@ -2413,22 +2900,19 @@ function CompactPercentHeader({ windowLabel }: { windowLabel: string }) {
 function HeaderAverageMeter({
   label,
   value,
-  tone,
 }: {
   label: string;
   value: number | null;
-  tone: "sky" | "emerald";
 }) {
-  const width = value ?? 0;
-  const bar = tone === "sky" ? "bg-sky-500" : "bg-emerald-500";
-  const text = tone === "sky" ? "text-sky-700" : "text-emerald-700";
+  const width = value === null ? 0 : Math.max(0, Math.min(100, value));
+  const tone = quotaRemainingTone(value);
 
   return (
-    <span className={cn("inline-flex items-center gap-1.5 whitespace-nowrap font-medium", text)}>
+    <span className={cn("inline-flex items-center gap-1.5 whitespace-nowrap font-medium", tone.text)}>
       <span>{label}</span>
       <span className="w-8 text-right tabular-nums">{formatPercent(value)}</span>
       <span className="h-1.5 w-12 overflow-hidden rounded bg-background ring-1 ring-border/60">
-        <span className={cn("block h-full rounded", bar)} style={{ width: `${width}%` }} />
+        <span className={cn("block h-full rounded", tone.bar)} style={{ width: `${width}%` }} />
       </span>
     </span>
   );
@@ -2486,6 +2970,8 @@ function mergeAuthFilesWithQuotas(
       subscriptionType: quota?.subscriptionType ?? null,
       usage5hPercent: quota?.usage5hPercent ?? null,
       usageWeekPercent: quota?.usageWeekPercent ?? null,
+      usage5hResetAt: quota?.usage5hResetAt ?? null,
+      usageWeekResetAt: quota?.usageWeekResetAt ?? null,
       exception,
       refreshedAt: quota?.capturedAt ?? file.lastSyncedAt,
     };
@@ -2529,21 +3015,73 @@ function estimateCpaGroupHeight(group: { authFiles: AuthFile[] }) {
   return 5 + Math.min(group.authFiles.length, 26);
 }
 
-function CompactPercentBar({ value, tone }: { value: number | null; tone: "sky" | "emerald" }) {
+function CompactPercentBar({
+  value,
+  resetAt,
+  nowMs,
+}: {
+  value: number | null;
+  resetAt: string | null;
+  nowMs: number;
+}) {
   const remaining = value === null ? null : Math.max(0, Math.min(100, 100 - value));
   const width = remaining ?? 0;
-  const bar = tone === "sky" ? "bg-sky-500" : "bg-emerald-500";
+  const tone = quotaRemainingTone(remaining);
+  const resetLabel = formatQuotaResetCountdown(resetAt, nowMs);
 
   return (
-    <div className="grid min-w-28 grid-cols-[2.75rem_1fr] items-center gap-2">
-      <span className="text-right text-xs tabular-nums text-muted-foreground">
-        {remaining === null ? "-" : `${remaining}%`}
-      </span>
+    <div
+      className="inline-flex h-7 w-[4.5rem] max-w-[4.5rem] flex-col justify-center gap-0.5 align-middle"
+      title={quotaResetTitle(resetAt)}
+    >
       <div className="h-1.5 rounded bg-muted">
-        <div className={cn("h-1.5 rounded", bar)} style={{ width: `${width}%` }} />
+        <div className={cn("h-1.5 rounded", tone.bar)} style={{ width: `${width}%` }} />
+      </div>
+      <div className="flex items-center justify-between gap-2 leading-none">
+        <span className={cn("text-[11px] tabular-nums", tone.text)}>
+          {remaining === null ? "-" : `${remaining}%`}
+        </span>
+        <span className="text-right text-[10px] text-muted-foreground tabular-nums">
+          {resetLabel ?? "-"}
+        </span>
       </div>
     </div>
   );
+}
+
+function quotaRemainingTone(remaining: number | null) {
+  if (remaining === null) {
+    return {
+      bar: "bg-muted-foreground/35",
+      text: "text-muted-foreground",
+    };
+  }
+
+  if (remaining < 20) {
+    return {
+      bar: "bg-rose-500",
+      text: "text-rose-700",
+    };
+  }
+
+  if (remaining < 50) {
+    return {
+      bar: "bg-amber-500",
+      text: "text-amber-700",
+    };
+  }
+
+  if (remaining < 80) {
+    return {
+      bar: "bg-sky-500",
+      text: "text-sky-700",
+    };
+  }
+
+  return {
+    bar: "bg-emerald-500",
+    text: "text-emerald-700",
+  };
 }
 
 function SubscriptionBadge({ value }: { value: string | null }) {
@@ -2561,39 +3099,6 @@ function SubscriptionBadge({ value }: { value: string | null }) {
     >
       {formatSubscriptionType(value)}
     </Badge>
-  );
-}
-
-function StrategiesSection({ rows, onSave }: { rows: StrategyRow[]; onSave: (strategy: StrategyRow["strategy"]) => Promise<void> }) {
-  const [drafts, setDrafts] = useState<Record<number, StrategyRow["strategy"]>>({});
-
-  return (
-    <section className="space-y-3">
-      {rows.map((row) => {
-        const draft = drafts[row.instance.id] ?? row.strategy;
-        if (!draft) {
-          return null;
-        }
-        return (
-          <div key={row.instance.id} className="grid gap-3 rounded-md border bg-card p-4 xl:grid-cols-[1.3fr_repeat(5,1fr)_auto]">
-            <div className="flex items-center gap-3">
-              <Switch checked={draft.enabled} onCheckedChange={(enabled) => setDrafts({ ...drafts, [row.instance.id]: { ...draft, enabled } })} />
-              <div className="font-medium">{row.instance.name}</div>
-            </div>
-            <NumberField label="5h用量%" value={draft.maintain5hUsagePercent} onChange={(value) => setDrafts({ ...drafts, [row.instance.id]: { ...draft, maintain5hUsagePercent: value } })} />
-            <NumberField label="周用量%" value={draft.maintainWeekUsagePercent} onChange={(value) => setDrafts({ ...drafts, [row.instance.id]: { ...draft, maintainWeekUsagePercent: value } })} />
-            <NumberField label="可用账号" value={draft.minAvailableAccounts} onChange={(value) => setDrafts({ ...drafts, [row.instance.id]: { ...draft, minAvailableAccounts: value } })} />
-            <NumberField label="单次上传" value={draft.maxBatchSize} onChange={(value) => setDrafts({ ...drafts, [row.instance.id]: { ...draft, maxBatchSize: value } })} />
-            <div className="flex items-end">
-              <Button onClick={() => void onSave(draft)}>
-                <Save className="h-4 w-4" />
-                保存
-              </Button>
-            </div>
-          </div>
-        );
-      })}
-    </section>
   );
 }
 
@@ -2616,8 +3121,8 @@ function ProxySection(props: {
   const formId = "proxy-form";
 
   return (
-    <section className="space-y-5">
-      <div className="flex flex-col gap-3 rounded-md border bg-card p-4 sm:flex-row sm:items-center sm:justify-between">
+    <section className="space-y-3">
+      <div className="flex flex-col gap-2.5 rounded-md border bg-card p-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <div className="font-medium">代理列表</div>
           <div className="text-sm text-muted-foreground">配置代理名称、URL、允许使用账号数和允许应用的 CPA 实例。</div>
@@ -2739,8 +3244,24 @@ function ProxySection(props: {
   );
 }
 
-function JobsSection({ jobs, runs, onRun, onSave }: { jobs: CronJob[]; runs: JobRun[]; onRun: (key: string) => Promise<void>; onSave: (job: CronJob) => Promise<void> }) {
+function JobsSection({
+  jobs,
+  runs,
+  runsPagination,
+  onRunsPageChange,
+  onRun,
+  onSave,
+}: {
+  jobs: CronJob[];
+  runs: JobRun[];
+  runsPagination: JobRunsPagination;
+  onRunsPageChange: (page: number) => Promise<void>;
+  onRun: (key: string) => Promise<void>;
+  onSave: (job: CronJob) => Promise<void>;
+}) {
   const [drafts, setDrafts] = useState<Record<string, CronJobDraft>>({});
+  const canGoPrevious = runsPagination.page > 1;
+  const canGoNext = runsPagination.page < runsPagination.totalPages;
 
   function updateDraft(job: CronJob, updater: (draft: CronJobDraft) => CronJobDraft) {
     setDrafts((current) => {
@@ -2759,7 +3280,7 @@ function JobsSection({ jobs, runs, onRun, onSave }: { jobs: CronJob[]; runs: Job
   }
 
   return (
-    <section className="space-y-5">
+    <section className="space-y-3">
       <DataTable
         headers={["任务", "执行频率", "状态", "下次执行", "最近执行", "错误", "操作"]}
         rows={jobs.map((job) => {
@@ -2799,8 +3320,38 @@ function JobsSection({ jobs, runs, onRun, onSave }: { jobs: CronJob[]; runs: Job
         })}
       />
       <Card>
-        <CardHeader>
-          <CardTitle className="text-base">执行记录</CardTitle>
+        <CardHeader className="grid-cols-[1fr_auto] items-center gap-3">
+          <div className="min-w-0">
+            <CardTitle className="text-base">执行记录</CardTitle>
+            <div className="mt-1 text-xs text-muted-foreground">
+              共 {runsPagination.total} 条，每页 {runsPagination.pageSize} 条
+            </div>
+          </div>
+          <div className="flex shrink-0 flex-wrap items-center justify-end gap-2 text-xs text-muted-foreground">
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={!canGoPrevious}
+              onClick={() => void onRunsPageChange(runsPagination.page - 1)}
+            >
+              <ChevronLeft className="h-3.5 w-3.5" />
+              上一页
+            </Button>
+            <span className="min-w-16 text-center tabular-nums">
+              {runsPagination.page} / {runsPagination.totalPages}
+            </span>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={!canGoNext}
+              onClick={() => void onRunsPageChange(runsPagination.page + 1)}
+            >
+              下一页
+              <ChevronRight className="h-3.5 w-3.5" />
+            </Button>
+          </div>
         </CardHeader>
         <CardContent>
           <DataTable
@@ -2967,81 +3518,6 @@ function scheduleTimeOrDefault(schedule: CronSimpleSchedule) {
 
 function finiteInputNumber(value: number, fallback: number) {
   return Number.isFinite(value) ? value : fallback;
-}
-
-function ReplenishmentRecordsSection({ records }: { records: ReplenishmentRecord[] }) {
-  return (
-    <section className="space-y-5">
-      <DataTable
-        headers={["时间", "来源", "CPA", "邮箱", "文件名", "状态", "原因/错误"]}
-        rows={records.map((record) => [
-          <span key="time" className="whitespace-nowrap text-muted-foreground">
-            {formatDate(record.createdAt)}
-          </span>,
-          <Badge key="source" variant="outline" className={cn("whitespace-nowrap", replenishmentSourceClass(record.source))}>
-            {formatReplenishmentSource(record.source)}
-          </Badge>,
-          <span key="cpa" className="font-medium">{record.cpaInstanceName ?? "-"}</span>,
-          <span key="email" className="whitespace-nowrap">{record.email ?? "-"}</span>,
-          <span key="file" className="block max-w-[260px] truncate text-xs text-muted-foreground" title={record.authFileName ?? "-"}>
-            {record.authFileName ?? "-"}
-          </span>,
-          <StatusBadge key="status" ok={record.status === "success"} label={record.status === "success" ? "成功" : "失败"} />,
-          <span
-            key="detail"
-            className={cn(
-              "block max-w-[360px] truncate text-xs",
-              record.error ? "text-rose-700" : "text-muted-foreground",
-            )}
-            title={record.error ?? formatReasonCodes(record.reasonCodes)}
-          >
-            {record.error ?? formatReasonCodes(record.reasonCodes)}
-          </span>,
-        ])}
-      />
-    </section>
-  );
-}
-
-function BackupAccountsSection(props: {
-  accounts: BackupAccount[];
-  text: string;
-  setText: (text: string) => void;
-  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
-  onDelete: (id: number) => Promise<void>;
-  onClear: (id: number) => Promise<void>;
-}) {
-  return (
-    <section className="space-y-5">
-      <form onSubmit={props.onSubmit} className="space-y-3 rounded-md border bg-card p-4">
-        <Label>批量上传</Label>
-        <Textarea value={props.text} onChange={(event) => props.setText(event.target.value)} className="min-h-36 font-mono text-xs" />
-        <Button type="submit">
-          <Plus className="h-4 w-4" />
-          导入
-        </Button>
-      </form>
-      <DataTable
-        headers={["邮箱", "当前归属", "文件名", "状态", "异常", "导入时间", "操作"]}
-        rows={props.accounts.map((account) => [
-          account.email,
-          account.ownerName ?? "无归属",
-          account.assignedAuthFileName ?? "-",
-          <StatusBadge key="status" ok={!account.exception} label={account.status} />,
-          <span key="exception" className="max-w-[320px] truncate text-rose-700">{account.exception ?? "无异常"}</span>,
-          formatDate(account.importedAt),
-          <div key="actions" className="flex gap-2">
-            <Button size="sm" variant="outline" onClick={() => void props.onClear(account.id)}>
-              清归属
-            </Button>
-            <Button size="icon" variant="ghost" onClick={() => void props.onDelete(account.id)}>
-              <Trash2 className="h-4 w-4" />
-            </Button>
-          </div>,
-        ])}
-      />
-    </section>
-  );
 }
 
 function ProxyCheckBadge({
@@ -3235,6 +3711,44 @@ function formatRelativeTime(value: string | null, nowMs: number) {
   return formatDate(value);
 }
 
+function formatQuotaResetCountdown(value: string | null, nowMs: number) {
+  if (!value) {
+    return null;
+  }
+
+  const resetAt = new Date(value).getTime();
+  if (!Number.isFinite(resetAt)) {
+    return null;
+  }
+
+  const seconds = Math.ceil((resetAt - nowMs) / 1000);
+  if (seconds <= 0) {
+    return "待刷新";
+  }
+  if (seconds < 60) {
+    return "即将";
+  }
+
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) {
+    return `${minutes}m`;
+  }
+
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  if (hours < 24) {
+    return remainingMinutes > 0 ? `${hours}h${remainingMinutes}m` : `${hours}h`;
+  }
+
+  const days = Math.floor(hours / 24);
+  const remainingHours = hours % 24;
+  return remainingHours > 0 ? `${days}d${remainingHours}h` : `${days}d`;
+}
+
+function quotaResetTitle(value: string | null) {
+  return value ? `预计 ${formatDate(value)} 刷新额度` : undefined;
+}
+
 function secondsUntilJobRun(job: CronJob | null, nowMs: number) {
   if (!job?.enabled) {
     return null;
@@ -3290,53 +3804,6 @@ function formatSubscriptionType(value: string) {
   };
 
   return labels[normalized] ?? value;
-}
-
-function formatReplenishmentSource(value: string) {
-  const labels: Record<string, string> = {
-    auto: "自动",
-    manual: "手动",
-    quick: "快捷",
-  };
-
-  return labels[value] ?? value;
-}
-
-function replenishmentSourceClass(value: string) {
-  const classes: Record<string, string> = {
-    auto: "border-emerald-300 bg-emerald-50 text-emerald-800",
-    manual: "border-blue-300 bg-blue-50 text-blue-800",
-    quick: "border-amber-300 bg-amber-50 text-amber-900",
-  };
-
-  return classes[value] ?? "border-slate-300 bg-slate-50 text-slate-700";
-}
-
-function formatReasonCodes(value: string | null) {
-  if (!value) {
-    return "-";
-  }
-
-  try {
-    const codes = JSON.parse(value) as unknown;
-    if (!Array.isArray(codes)) {
-      return value;
-    }
-
-    return codes.map((code) => reasonCodeLabel(String(code))).join("、") || "-";
-  } catch {
-    return value;
-  }
-}
-
-function reasonCodeLabel(value: string) {
-  const labels: Record<string, string> = {
-    available_accounts_below_target: "可用账号不足",
-    usage_5h_below_target: "5h用量低于策略",
-    usage_week_below_target: "周用量低于策略",
-  };
-
-  return labels[value] ?? value;
 }
 
 function subscriptionBadgeClass(value: string) {

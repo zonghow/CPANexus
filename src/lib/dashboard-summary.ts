@@ -14,10 +14,6 @@ type QuotaSnapshotLike = {
   usageWeekPercent: number | null;
 };
 
-type BackupAccountLike = {
-  assignedCpaInstanceId: number | null;
-};
-
 type ProxyLike = {
   id: number;
   enabled: boolean;
@@ -34,7 +30,6 @@ export type DashboardStats = {
   enabledInstances: number;
   authFiles: number;
   availableAuthFiles: number;
-  idleBackupAccounts: number;
   proxies: number;
   average5hRemainingPercent: number | null;
   averageWeekRemainingPercent: number | null;
@@ -44,7 +39,6 @@ export function summarizeDashboardStats(input: {
   cpaInstances: CpaInstanceLike[];
   authFiles: AuthFileLike[];
   quotaSnapshots: QuotaSnapshotLike[];
-  backupAccounts: BackupAccountLike[];
   proxies: ProxyLike[];
   proxyCpaInstances: ProxyCpaInstanceLike[];
 }): DashboardStats {
@@ -69,7 +63,6 @@ export function summarizeDashboardStats(input: {
     enabledInstances: enabledInstanceIds.size,
     authFiles: enabledAuthFiles.length,
     availableAuthFiles: enabledAuthFiles.filter((authFile) => authFile.available).length,
-    idleBackupAccounts: input.backupAccounts.filter((account) => account.assignedCpaInstanceId === null).length,
     proxies: input.proxies.filter((proxy) => proxy.enabled && enabledProxyIds.has(proxy.id)).length,
     average5hRemainingPercent: averageCpaRemainingPercent(
       [...enabledInstanceIds],

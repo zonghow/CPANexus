@@ -1,7 +1,7 @@
 import { and, eq } from "drizzle-orm";
 
 import { db } from "@/db/client";
-import { authFiles, backupAccounts, cpaInstances, proxies, proxyCpaInstances, quotaSnapshots } from "@/db/schema";
+import { authFiles, cpaInstances, proxies, proxyCpaInstances, quotaSnapshots } from "@/db/schema";
 import {
   badRequest,
   initRequestDb,
@@ -81,7 +81,6 @@ export async function DELETE(
 
     await deleteRemoteAuthFile(sourceInstance, authFile.fileName);
     deleteLocalAuthFile(authFile.cpaInstanceId, authFile.id, authFile.fileName);
-    clearBackupAssignment(authFile.cpaInstanceId, authFile.fileName);
 
     return okWithOptionalSync(await syncAffectedCpaInstances([sourceInstance.id]));
   } catch (error) {
@@ -251,19 +250,6 @@ export async function PATCH(
       })
       .where(eq(authFiles.id, authFile.id))
       .run();
-    db.update(backupAccounts)
-      .set({
-        assignedCpaInstanceId: targetInstance.id,
-        assignedAt: movedAt,
-        lastCheckedAt: movedAt,
-      })
-      .where(
-        and(
-          eq(backupAccounts.assignedCpaInstanceId, sourceInstance.id),
-          eq(backupAccounts.assignedAuthFileName, authFile.fileName),
-        ),
-      )
-      .run();
 
     return okWithOptionalSync(
       await syncAffectedCpaInstances([sourceInstance.id, targetInstance.id]),
@@ -292,25 +278,6 @@ function deleteLocalAuthFile(cpaInstanceId: number, authFileId: number, fileName
     )
     .run();
   db.delete(authFiles).where(eq(authFiles.id, authFileId)).run();
-}
-
-function clearBackupAssignment(cpaInstanceId: number, fileName: string) {
-  const now = new Date().toISOString();
-  db.update(backupAccounts)
-    .set({
-      status: "idle",
-      assignedCpaInstanceId: null,
-      assignedAuthFileName: null,
-      assignedAt: null,
-      lastCheckedAt: now,
-    })
-    .where(
-      and(
-        eq(backupAccounts.assignedCpaInstanceId, cpaInstanceId),
-        eq(backupAccounts.assignedAuthFileName, fileName),
-      ),
-    )
-    .run();
 }
 
 async function loadAuthPayload(

@@ -1,8 +1,8 @@
 # CPA Nexus
 
 CPA Nexus is a Next.js operations console for managing multiple CLIProxyAPI
-instances, Codex auth files, quota snapshots, proxy assignment, backup accounts,
-and automatic account replenishment.
+instances, Codex auth files, quota snapshots, proxy assignment, and scheduler
+operations.
 
 ## Features
 
@@ -10,9 +10,7 @@ and automatic account replenishment.
 - Account management grouped by CPA instance, including quotas, subscription
   tags, availability, proxy configuration, disable/enable, delete, move, and
   per-account quota refresh.
-- Backup account pool with batch import and assignment tracking.
-- Automatic replenishment based on quota and available account thresholds.
-- Replenishment records for manual, quick, OAuth, and automatic uploads.
+- Manual account add flows through RT, Mobile RT, and OAuth login.
 - Proxy management with CPA allow-listing, per-proxy account capacity, enable
   switch, and one-click proxy checks.
 - Cron-style scheduler with simplified UI presets.
@@ -138,7 +136,7 @@ Create `docker-compose.yml`:
 ```yaml
 services:
   web:
-    image: ${CPA_NEXUS_IMAGE:-zonghao/cpa-nexus:0.1.1-amd64}
+    image: ${CPA_NEXUS_IMAGE:-zonghao/cpa-nexus:0.1.2-amd64}
     command: npm run start
     environment:
       DATABASE_URL: file:/app/data/cpa-nexus.db
@@ -152,7 +150,7 @@ services:
     restart: unless-stopped
 
   worker:
-    image: ${CPA_NEXUS_IMAGE:-zonghao/cpa-nexus:0.1.1-amd64}
+    image: ${CPA_NEXUS_IMAGE:-zonghao/cpa-nexus:0.1.2-amd64}
     command: npm run worker
     environment:
       DATABASE_URL: file:/app/data/cpa-nexus.db
@@ -191,21 +189,21 @@ change the port mapping to `"9527:3000"`.
 The current versioned image is:
 
 ```bash
-zonghao/cpa-nexus:0.1.1-amd64
+zonghao/cpa-nexus:0.1.2-amd64
 ```
 
 Use a specific image with Docker Compose:
 
 ```bash
-CPA_NEXUS_IMAGE=zonghao/cpa-nexus:0.1.1-amd64 docker compose pull
-CPA_NEXUS_IMAGE=zonghao/cpa-nexus:0.1.1-amd64 docker compose up -d
+CPA_NEXUS_IMAGE=zonghao/cpa-nexus:0.1.2-amd64 docker compose pull
+CPA_NEXUS_IMAGE=zonghao/cpa-nexus:0.1.2-amd64 docker compose up -d
 ```
 
 Build and push a new Linux amd64 image from your local machine:
 
 ```bash
 docker buildx build --platform linux/amd64 \
-  -t zonghao/cpa-nexus:0.1.1-amd64 \
+  -t zonghao/cpa-nexus:0.1.2-amd64 \
   --push .
 ```
 
@@ -230,7 +228,7 @@ Supported management endpoints include:
 
 The quota refresh path is configurable per CPA instance. The default path is
 `/v0/management/auth-files`. CPA Nexus normalizes common quota payload shapes and
-matches exceptions back to backup accounts by email.
+matches quota rows back to local auth files by email or file name.
 
 ## Scripts
 
