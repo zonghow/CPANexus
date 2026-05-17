@@ -21,7 +21,16 @@ import {
   Trash2,
 } from "lucide-react";
 import Link from "next/link";
-import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type ChangeEvent,
+  type DragEvent,
+  type FormEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { createPortal } from "react-dom";
 import { toast } from "sonner";
 
@@ -194,6 +203,22 @@ type RtLoginAuthResult = {
 };
 
 type RtLoginUploadResult = {
+  uploaded: number;
+  failed: number;
+  results: Array<{
+    email: string | null;
+    fileName: string | null;
+    status: "success" | "error" | string;
+    error?: string;
+  }>;
+};
+
+type CpaJsonUploadFile = {
+  fileName: string;
+  payload: Record<string, unknown>;
+};
+
+type CpaJsonUploadResult = {
   uploaded: number;
   failed: number;
   results: Array<{
@@ -731,6 +756,25 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
     return result;
   }
 
+  async function uploadCpaJsonFiles(
+    cpaInstanceId: number,
+    files: CpaJsonUploadFile[],
+  ) {
+    let result: CpaJsonUploadResult | null = null;
+    await withUpdatingCpaTables([cpaInstanceId], async () => {
+      result = await mutate<CpaJsonUploadResult>(
+        `/api/cpa-instances/${cpaInstanceId}/auth-json`,
+        {
+          method: "POST",
+          body: JSON.stringify({ files }),
+        },
+      );
+      setMessage("");
+      await loadAll();
+    });
+    return result;
+  }
+
   async function batchHandleExceptionAuthFiles(
     cpaInstanceId: number,
     action: BatchExceptionAction,
@@ -942,6 +986,7 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
                 onRefreshAuthFileQuota={refreshAuthFileQuota}
                 onRtLoginAccount={rtLoginCpaAccount}
                 onUploadRtLoginAccounts={uploadRtLoginCpaAccounts}
+                onUploadCpaJsonFiles={uploadCpaJsonFiles}
                 onBatchHandleExceptionAuthFiles={batchHandleExceptionAuthFiles}
                 onAutoAssignCpaProxies={autoAssignCpaProxies}
                 onRefreshCpa={refreshCpaInstance}
@@ -1208,6 +1253,7 @@ function AuthFilesSection({
   onRefreshAuthFileQuota,
   onRtLoginAccount,
   onUploadRtLoginAccounts,
+  onUploadCpaJsonFiles,
   onBatchHandleExceptionAuthFiles,
   onAutoAssignCpaProxies,
   onRefreshCpa,
@@ -1235,6 +1281,10 @@ function AuthFilesSection({
     mode: RtLoginMode,
     entries: RtLoginAuthResult[],
   ) => Promise<RtLoginUploadResult | null>;
+  onUploadCpaJsonFiles: (
+    cpaInstanceId: number,
+    files: CpaJsonUploadFile[],
+  ) => Promise<CpaJsonUploadResult | null>;
   onBatchHandleExceptionAuthFiles: (
     cpaInstanceId: number,
     action: BatchExceptionAction,
@@ -1285,9 +1335,12 @@ function AuthFilesSection({
     successVerb: string;
     target?: BatchAuthFileTarget;
   } | null>(null);
+  const [dragTargetCpaId, setDragTargetCpaId] = useState<number | null>(null);
   const [useDesktopMasonry, setUseDesktopMasonry] = useState(false);
   const loginMenuRef = useRef<HTMLDivElement | null>(null);
   const bulkMenuRef = useRef<HTMLDivElement | null>(null);
+  const cpaJsonInputRef = useRef<HTMLInputElement | null>(null);
+  const cpaJsonUploadTargetRef = useRef<CpaInstance | null>(null);
 
   useEffect(() => {
     if (openLoginMenuInstanceId === null) {
@@ -1368,6 +1421,113 @@ function AuthFilesSection({
       error: null,
       rows: [],
     });
+  }
+
+  function openCpaJsonPicker(instance: CpaInstance) {
+    setOpenLoginMenuInstanceId(null);
+    cpaJsonUploadTargetRef.current = instance;
+    cpaJsonInputRef.current?.click();
+  }
+
+  async function handleCpaJsonInputChange(event: ChangeEvent<HTMLInputElement>) {
+    const input = event.currentTarget;
+    const files = Array.from(input.files ?? []);
+    input.value = "";
+
+    const instance = cpaJsonUploadTargetRef.current;
+    cpaJsonUploadTargetRef.current = null;
+    if (!instance || files.length === 0) {
+      return;
+    }
+
+    await uploadJsonFilesToCpa(instance, files);
+  }
+
+  async function uploadJsonFilesToCpa(instance: CpaInstance, files: File[]) {
+    if (files.length === 0) {
+      return;
+    }
+
+    const uploadFiles: CpaJsonUploadFile[] = [];
+    for (const file of files) {
+      if (!file.name.toLowerCase().endsWith(".json")) {
+        toast.error(`${file.name} 不是 JSON 文件`);
+        return;
+      }
+
+      let payload: unknown;
+      try {
+        payload = JSON.parse(await file.text()) as unknown;
+      } catch {
+        toast.error(`${file.name} 解析失败，请确认文件内容是合法 JSON`);
+        return;
+      }
+
+      if (!isJsonObject(payload)) {
+        toast.error(`${file.name} 必须是 JSON 对象`);
+        return;
+      }
+
+      uploadFiles.push({
+        fileName: file.name,
+        payload,
+      });
+    }
+
+    try {
+      const result = await onUploadCpaJsonFiles(instance.id, uploadFiles);
+      const uploaded = result?.uploaded ?? uploadFiles.length;
+      const failed = result?.failed ?? 0;
+      if (failed > 0) {
+        toast.warning(`已上传 ${uploaded} 个 JSON 文件，${failed} 个失败`);
+      } else {
+        toast.success(`已上传 ${uploaded} 个 JSON 文件`);
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  function handleCpaJsonDragEnter(event: DragEvent<HTMLElement>, instance: CpaInstance) {
+    if (!hasDraggedFiles(event)) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    setDragTargetCpaId(instance.id);
+  }
+
+  function handleCpaJsonDragOver(event: DragEvent<HTMLElement>, instance: CpaInstance) {
+    if (!hasDraggedFiles(event)) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = "copy";
+    if (dragTargetCpaId !== instance.id) {
+      setDragTargetCpaId(instance.id);
+    }
+  }
+
+  function handleCpaJsonDragLeave(event: DragEvent<HTMLElement>, instance: CpaInstance) {
+    if (dragTargetCpaId !== instance.id) {
+      return;
+    }
+    const relatedTarget = event.relatedTarget;
+    if (relatedTarget instanceof Node && event.currentTarget.contains(relatedTarget)) {
+      return;
+    }
+    setDragTargetCpaId(null);
+  }
+
+  function handleCpaJsonDrop(event: DragEvent<HTMLElement>, instance: CpaInstance) {
+    if (!hasDraggedFiles(event)) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    setDragTargetCpaId(null);
+    void uploadJsonFilesToCpa(instance, Array.from(event.dataTransfer.files));
   }
 
   function openOAuthLogin(instance: CpaInstance) {
@@ -1627,6 +1787,7 @@ function AuthFilesSection({
           const average5hRemaining = averageRemainingPercent(activeRows.map((row) => row.usage5hPercent));
           const averageWeekRemaining = averageRemainingPercent(activeRows.map((row) => row.usageWeekPercent));
           const isUpdating = updatingCpaIds.has(group.instance.id);
+          const isDragTarget = dragTargetCpaId === group.instance.id;
           const hasOpenHeaderMenu =
             openLoginMenuInstanceId === group.instance.id ||
             openBulkMenuInstanceId === group.instance.id;
@@ -1637,8 +1798,13 @@ function AuthFilesSection({
               aria-busy={isUpdating}
               className={cn(
                 "relative min-w-0 rounded-md border bg-card",
+                isDragTarget && "border-primary/60 ring-2 ring-primary/30",
                 hasOpenHeaderMenu ? "z-50 overflow-visible" : "overflow-hidden",
               )}
+              onDragEnter={(event) => handleCpaJsonDragEnter(event, group.instance)}
+              onDragOver={(event) => handleCpaJsonDragOver(event, group.instance)}
+              onDragLeave={(event) => handleCpaJsonDragLeave(event, group.instance)}
+              onDrop={(event) => handleCpaJsonDrop(event, group.instance)}
             >
               <div className="space-y-2 border-b bg-muted/35 px-3 py-2">
                 <div className="flex min-w-0 flex-wrap items-center gap-2">
@@ -1694,6 +1860,14 @@ function AuthFilesSection({
                         >
                           <LogIn className="h-3 w-3" />
                           Mobile RT登录
+                        </button>
+                        <button
+                          type="button"
+                          className="flex w-full items-center gap-1.5 rounded px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground"
+                          onClick={() => openCpaJsonPicker(group.instance)}
+                        >
+                          <FileKey2 className="h-3 w-3" />
+                          JSON 文件
                         </button>
                         <Separator className="my-1" />
                         <button
@@ -1864,6 +2038,14 @@ function AuthFilesSection({
                 onToggleDisabled={onToggleAuthFileDisabled}
                 onRefreshQuota={onRefreshAuthFileQuota}
               />
+              {isDragTarget ? (
+                <div className="pointer-events-none absolute inset-0 z-[55] flex items-center justify-center bg-background/75 backdrop-blur-[1px]">
+                  <div className="flex items-center gap-2 rounded-md border border-primary/30 bg-card px-3 py-2 text-sm font-medium text-primary shadow-sm">
+                    <FileKey2 className="h-4 w-4" />
+                    松开上传 JSON 文件到 {group.instance.name}
+                  </div>
+                </div>
+              ) : null}
               {isUpdating ? (
                 <div className="absolute inset-0 z-40 flex items-center justify-center bg-background/70 backdrop-blur-[1px]">
                   <div className="flex items-center gap-2 rounded-md border bg-card px-3 py-2 text-sm font-medium shadow-sm">
@@ -1878,6 +2060,14 @@ function AuthFilesSection({
 
   return (
     <>
+      <input
+        ref={cpaJsonInputRef}
+        type="file"
+        accept="application/json,.json"
+        multiple
+        className="hidden"
+        onChange={(event) => void handleCpaJsonInputChange(event)}
+      />
       <section className={cn(groupColumns.length > 1 ? "grid grid-cols-2 gap-3" : "space-y-3")}>
         {groupColumns.length === 1
           ? groupColumns[0].map(renderGroupCard)
@@ -2886,6 +3076,14 @@ function maskRefreshToken(value: string) {
     return value;
   }
   return `${value.slice(0, 8)}...${value.slice(-4)}`;
+}
+
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasDraggedFiles(event: DragEvent<HTMLElement>) {
+  return Array.from(event.dataTransfer.types).includes("Files");
 }
 
 function CompactPercentHeader({ windowLabel }: { windowLabel: string }) {
