@@ -11,6 +11,8 @@ vi.mock("@/lib/api", async (importOriginal) => {
 });
 
 vi.mock("@/lib/jobs", () => ({
+  isCpaInstanceAlreadySyncingError: (error: unknown) =>
+    error instanceof Error && error.name === "CpaInstanceAlreadySyncingError",
   syncCpaInstanceById: vi.fn(),
 }));
 
@@ -39,6 +41,27 @@ describe("/api/cpa-instances/[id]/sync", () => {
       instance: "source",
     });
     expect(jobs.syncCpaInstanceById).toHaveBeenCalledWith(42);
+  });
+
+  it("returns a conflict when the CPA instance is already syncing", async () => {
+    const jobs = await import("@/lib/jobs");
+    const error = new Error("CPA source 正在同步中");
+    error.name = "CpaInstanceAlreadySyncingError";
+    vi.mocked(jobs.syncCpaInstanceById).mockRejectedValue(error);
+    const route = await import("./route");
+
+    const response = await route.POST(
+      new Request("http://localhost/api/cpa-instances/42/sync", {
+        method: "POST",
+        headers: authHeaders(),
+      }),
+      { params: Promise.resolve({ id: "42" }) },
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: "CPA source 正在同步中",
+    });
   });
 });
 

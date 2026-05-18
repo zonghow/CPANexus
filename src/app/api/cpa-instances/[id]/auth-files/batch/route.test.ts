@@ -287,7 +287,7 @@ describe("/api/cpa-instances/[id]/auth-files/batch", () => {
     ]);
   });
 
-  it("auto assigns allowed enabled proxies without exceeding their account capacity", async () => {
+  it("auto assigns allowed enabled proxies by balancing current account usage", async () => {
     const sqlite = await setupSqlite();
     const cpaInstanceId = insertInstance(sqlite);
     insertAuthFile(sqlite, cpaInstanceId, "codex-has-proxy@example.com-auto.json", {
@@ -345,13 +345,13 @@ describe("/api/cpa-instances/[id]/auth-files/batch", () => {
       1,
       expect.objectContaining({ id: cpaInstanceId }),
       "codex-first@example.com-auto.json",
-      { proxy_url: "http://proxy-a.example.com:8080" },
+      { proxy_url: "http://proxy-b.example.com:8080" },
     );
     expect(cpaClient.patchRemoteAuthFileFields).toHaveBeenNthCalledWith(
       2,
       expect.objectContaining({ id: cpaInstanceId }),
       "codex-second@example.com-auto.json",
-      { proxy_url: "http://proxy-b.example.com:8080" },
+      { proxy_url: "http://proxy-a.example.com:8080" },
     );
     expect(jobs.syncCpaInstanceById).toHaveBeenCalledTimes(1);
     expect(jobs.syncCpaInstanceById).toHaveBeenCalledWith(cpaInstanceId);
@@ -360,14 +360,14 @@ describe("/api/cpa-instances/[id]/auth-files/batch", () => {
       .prepare("SELECT id, proxy_url, raw_json FROM auth_files ORDER BY id")
       .all() as Array<{ id: number; proxy_url: string | null; raw_json: string | null }>;
     expect(rows.find((row) => row.id === firstUnassignedId)?.proxy_url).toBe(
-      "http://proxy-a.example.com:8080",
+      "http://proxy-b.example.com:8080",
     );
     expect(JSON.parse(rows.find((row) => row.id === firstUnassignedId)?.raw_json ?? "{}")).toMatchObject({
       email: "first@example.com",
-      proxy_url: "http://proxy-a.example.com:8080",
+      proxy_url: "http://proxy-b.example.com:8080",
     });
     expect(rows.find((row) => row.id === secondUnassignedId)?.proxy_url).toBe(
-      "http://proxy-b.example.com:8080",
+      "http://proxy-a.example.com:8080",
     );
     expect(rows.find((row) => row.id === skippedId)?.proxy_url).toBeNull();
   });

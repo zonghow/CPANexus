@@ -143,6 +143,18 @@ export const jobRuns = sqliteTable("job_runs", {
   rawJson: text("raw_json"),
 });
 
+export const cpaInstanceSyncRuns = sqliteTable("cpa_instance_sync_runs", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  cpaInstanceId: integer("cpa_instance_id")
+    .notNull()
+    .references(() => cpaInstances.id, { onDelete: "cascade" }),
+  status: text("status").notNull(),
+  message: text("message"),
+  startedAt: text("started_at").notNull(),
+  finishedAt: text("finished_at"),
+  rawJson: text("raw_json"),
+});
+
 export type CpaInstance = typeof cpaInstances.$inferSelect;
 export type NewCpaInstance = typeof cpaInstances.$inferInsert;
 export type AuthFile = typeof authFiles.$inferSelect;

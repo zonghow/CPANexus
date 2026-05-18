@@ -1,5 +1,6 @@
 import {
   badRequest,
+  conflict,
   initRequestDb,
   ok,
   parseIntegerId,
@@ -7,7 +8,7 @@ import {
   routeParams,
   serverError,
 } from "@/lib/api";
-import { syncCpaInstanceById } from "@/lib/jobs";
+import { isCpaInstanceAlreadySyncingError, syncCpaInstanceById } from "@/lib/jobs";
 
 export const runtime = "nodejs";
 
@@ -30,6 +31,9 @@ export async function POST(
 
     return ok(await syncCpaInstanceById(cpaInstanceId));
   } catch (error) {
+    if (isCpaInstanceAlreadySyncingError(error)) {
+      return conflict(error.message);
+    }
     return serverError(error);
   }
 }

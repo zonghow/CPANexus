@@ -1,9 +1,9 @@
-import { desc, inArray, sql } from "drizzle-orm";
+import { and, desc, inArray, isNull, sql } from "drizzle-orm";
 
 import { db } from "@/db/client";
-import { cronJobs, jobRuns } from "@/db/schema";
+import { cpaInstanceSyncRuns, cronJobs, jobRuns } from "@/db/schema";
 import { initRequestDb, ok, requireAuth, serverError } from "@/lib/api";
-import { nextCronRunAfter } from "@/lib/cron-next-run";
+import { nextCronRunAfterLastRun } from "@/lib/cron-next-run";
 
 export const runtime = "nodejs";
 
@@ -25,6 +25,19 @@ export async function GET(request: Request) {
     const jobs = db.select().from(cronJobs).orderBy(cronJobs.name).all();
     const jobKeys = jobs.map((job) => job.key);
     const runsWhere = jobKeys.length > 0 ? inArray(jobRuns.jobKey, jobKeys) : undefined;
+    const activeRuns = jobKeys.length > 0
+      ? db
+        .select()
+        .from(jobRuns)
+        .where(and(inArray(jobRuns.jobKey, jobKeys), isNull(jobRuns.finishedAt)))
+        .all()
+      : [];
+    const activeRunByJobKey = new Map(activeRuns.map((run) => [run.jobKey, run]));
+    const cpaSyncs = db
+      .select()
+      .from(cpaInstanceSyncRuns)
+      .where(isNull(cpaInstanceSyncRuns.finishedAt))
+      .all();
     const runsTotal = db
       .select({ count: sql<number>`count(*)` })
       .from(jobRuns)
@@ -43,9 +56,14 @@ export async function GET(request: Request) {
 
     return ok({
       jobs: jobs.map((job) => {
-        const nextRunAt = job.enabled ? nextCronRunAfter(job.cron, now) : null;
+        const activeRun = activeRunByJobKey.get(job.key);
+        const nextRunAt = job.enabled && !activeRun
+          ? nextCronRunAfterLastRun(job.cron, job.lastRunAt, now)
+          : null;
         return {
           ...job,
+          running: Boolean(activeRun),
+          runningStartedAt: activeRun?.startedAt ?? null,
           nextRunAt: nextRunAt?.toISOString() ?? null,
           secondsUntilNextRun: nextRunAt
             ? Math.max(0, Math.ceil((nextRunAt.getTime() - now.getTime()) / 1000))
@@ -53,6 +71,10 @@ export async function GET(request: Request) {
         };
       }),
       runs,
+      cpaSyncs: cpaSyncs.map((run) => ({
+        cpaInstanceId: run.cpaInstanceId,
+        startedAt: run.startedAt,
+      })),
       runsPagination: {
         page: runsPage,
         pageSize: runsPageSize,

@@ -55,6 +55,87 @@ describe("sync jobs", () => {
     ).toEqual([{ job_key: "sync-cpa-instances", status: "success" }]);
   });
 
+  it("rejects overlapping sync jobs while one is still running", async () => {
+    const sqlite = await setupSqlite();
+    insertInstance(sqlite);
+
+    const cpaClient = await import("@/lib/cpa-client");
+    const remoteFiles = deferred<never[]>();
+    vi.mocked(cpaClient.listRemoteAuthFiles).mockReturnValue(remoteFiles.promise);
+    vi.mocked(cpaClient.refreshRemoteQuotas).mockResolvedValue([]);
+    const jobs = await import("./jobs");
+
+    const firstRun = jobs.runJobByKey("sync-cpa-instances");
+    await vi.waitFor(() => {
+      expect(
+        sqlite
+          .prepare("SELECT status FROM job_runs WHERE job_key = 'sync-cpa-instances' AND finished_at IS NULL")
+          .get(),
+      ).toEqual({ status: "running" });
+    });
+
+    await expect(jobs.runJobByKey("sync-cpa-instances")).rejects.toThrow(
+      "当前有同步任务正在进行中",
+    );
+
+    remoteFiles.resolve([]);
+    await expect(firstRun).resolves.toMatchObject({ status: "success" });
+    expect(
+      sqlite.prepare("SELECT job_key, status, finished_at IS NOT NULL AS finished FROM job_runs ORDER BY id").all(),
+    ).toEqual([{ job_key: "sync-cpa-instances", status: "success", finished: 1 }]);
+  });
+
+  it("prevents overlapping syncs for the same CPA instance", async () => {
+    const sqlite = await setupSqlite();
+    const cpaInstanceId = insertInstance(sqlite);
+
+    const cpaClient = await import("@/lib/cpa-client");
+    const remoteFiles = deferred<never[]>();
+    vi.mocked(cpaClient.listRemoteAuthFiles).mockReturnValue(remoteFiles.promise);
+    vi.mocked(cpaClient.refreshRemoteQuotas).mockResolvedValue([]);
+    const jobs = await import("./jobs");
+
+    const firstRun = jobs.syncCpaInstanceById(cpaInstanceId);
+    await vi.waitFor(() => {
+      expect(
+        sqlite
+          .prepare("SELECT status FROM cpa_instance_sync_runs WHERE cpa_instance_id = ? AND finished_at IS NULL")
+          .get(cpaInstanceId),
+      ).toEqual({ status: "running" });
+    });
+
+    await expect(jobs.syncCpaInstanceById(cpaInstanceId)).rejects.toThrow(
+      "CPA target 正在同步中",
+    );
+
+    const globalRun = await jobs.runJobByKey("sync-cpa-instances");
+    expect(globalRun).toMatchObject({
+      status: "error",
+      message: "同步完成：0 成功，1 失败",
+      details: [
+        {
+          instance: "target",
+          status: "error",
+          message: "CPA target 正在同步中，已跳过",
+        },
+      ],
+    });
+
+    remoteFiles.resolve([]);
+    await expect(firstRun).resolves.toMatchObject({ status: "success" });
+    expect(
+      sqlite
+        .prepare(`
+          SELECT cpa_instance_id, status, finished_at IS NOT NULL AS finished
+          FROM cpa_instance_sync_runs
+          ORDER BY id
+        `)
+        .all(),
+    ).toEqual([
+      { cpa_instance_id: cpaInstanceId, status: "success", finished: 1 },
+    ]);
+  });
+
   it("reads per-account proxy_url from downloaded auth files during sync", async () => {
     const sqlite = await setupSqlite();
     const cpaInstanceId = insertInstance(sqlite);
@@ -355,6 +436,17 @@ function insertQuotaSnapshot(
       )
     `)
     .run({ cpaInstanceId, ...input });
+}
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+
+  return { promise, resolve, reject };
 }
 
 function globalDb() {

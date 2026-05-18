@@ -2,6 +2,7 @@
 
 import { FormEvent, useState } from "react";
 import { Loader2, LockKeyhole } from "lucide-react";
+import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -15,13 +16,11 @@ import { Label } from "@/components/ui/label";
 
 export function LoginPage() {
   const [password, setPassword] = useState("");
-  const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setLoading(true);
-    setError("");
 
     try {
       const response = await fetch("/api/auth/login", {
@@ -37,7 +36,7 @@ export function LoginPage() {
       }
       window.location.reload();
     } catch (loginError) {
-      setError(loginError instanceof Error ? loginError.message : String(loginError));
+      toast.error(loginError instanceof Error ? loginError.message : String(loginError));
     } finally {
       setLoading(false);
     }
@@ -66,11 +65,6 @@ export function LoginPage() {
                 onChange={(event) => setPassword(event.target.value)}
               />
             </div>
-            {error ? (
-              <div className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-900">
-                {error}
-              </div>
-            ) : null}
             <Button type="submit" className="w-full" disabled={loading || !password}>
               {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
               登录

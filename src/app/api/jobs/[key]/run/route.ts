@@ -1,5 +1,5 @@
-import { initRequestDb, ok, requireAuth, routeParams, serverError } from "@/lib/api";
-import { runJobByKey } from "@/lib/jobs";
+import { conflict, initRequestDb, ok, requireAuth, routeParams, serverError } from "@/lib/api";
+import { isJobAlreadyRunningError, runJobByKey } from "@/lib/jobs";
 
 export const runtime = "nodejs";
 
@@ -18,6 +18,9 @@ export async function POST(
     const result = await runJobByKey(decodeURIComponent(key));
     return ok(result);
   } catch (error) {
+    if (isJobAlreadyRunningError(error)) {
+      return conflict(error.message);
+    }
     return serverError(error);
   }
 }

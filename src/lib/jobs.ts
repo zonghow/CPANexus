@@ -3,6 +3,7 @@ import { and, eq, notInArray, or, sql } from "drizzle-orm";
 import { db } from "@/db/client";
 import {
   authFiles,
+  cpaInstanceSyncRuns,
   cpaInstances,
   cronJobs,
   dashboardMetricSnapshots,
@@ -28,6 +29,29 @@ export const jobKeys = {
 
 const quotaPendingStatus = "待配额刷新";
 const quotaPendingMessage = "等待配额刷新接口返回结果";
+const jobRunningMessage = "当前有同步任务正在进行中";
+
+export class JobAlreadyRunningError extends Error {
+  constructor() {
+    super(jobRunningMessage);
+    this.name = "JobAlreadyRunningError";
+  }
+}
+
+export function isJobAlreadyRunningError(error: unknown) {
+  return error instanceof JobAlreadyRunningError;
+}
+
+export class CpaInstanceAlreadySyncingError extends Error {
+  constructor(public readonly instance: Pick<CpaInstance, "id" | "name">) {
+    super(`CPA ${instance.name} 正在同步中`);
+    this.name = "CpaInstanceAlreadySyncingError";
+  }
+}
+
+export function isCpaInstanceAlreadySyncingError(error: unknown) {
+  return error instanceof CpaInstanceAlreadySyncingError;
+}
 
 export type JobRunResult = {
   status: "success" | "error";
@@ -59,7 +83,18 @@ export async function syncCpaInstances(): Promise<JobRunResult> {
   const details: CpaInstanceSyncResult[] = [];
 
   for (const instance of instances) {
-    details.push(await syncCpaInstance(instance));
+    try {
+      details.push(await syncCpaInstance(instance));
+    } catch (error) {
+      if (!isCpaInstanceAlreadySyncingError(error)) {
+        throw error;
+      }
+      details.push({
+        instance: instance.name,
+        status: "error",
+        message: `${error.message}，已跳过`,
+      });
+    }
   }
 
   const failed = details.filter((detail) => detail.status === "error").length;
@@ -85,6 +120,10 @@ export async function syncCpaInstanceById(cpaInstanceId: number) {
 }
 
 async function syncCpaInstance(instance: CpaInstance): Promise<CpaInstanceSyncResult> {
+  return recordCpaInstanceSyncRun(instance, () => performCpaInstanceSync(instance));
+}
+
+async function performCpaInstanceSync(instance: CpaInstance): Promise<CpaInstanceSyncResult> {
   try {
     const remoteFiles = await listRemoteAuthFiles(instance);
     await syncAuthFilesForInstance(instance, remoteFiles);
@@ -468,19 +507,27 @@ async function recordJobRun(
   run: () => Promise<JobRunResult>,
 ): Promise<JobRunResult> {
   const startedAt = nowIso();
+  const runId = insertRunningJobRun(jobKey, startedAt);
+  db.update(cronJobs)
+    .set({
+      lastStatus: "running",
+      lastError: null,
+      updatedAt: startedAt,
+    })
+    .where(eq(cronJobs.key, jobKey))
+    .run();
 
   try {
     const result = await run();
     const finishedAt = nowIso();
-    db.insert(jobRuns)
-      .values({
-        jobKey,
+    db.update(jobRuns)
+      .set({
         status: result.status,
         message: result.message,
-        startedAt,
         finishedAt,
         rawJson: JSON.stringify(result.details ?? null),
       })
+      .where(eq(jobRuns.id, runId))
       .run();
     db.update(cronJobs)
       .set({
@@ -495,14 +542,13 @@ async function recordJobRun(
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const finishedAt = nowIso();
-    db.insert(jobRuns)
-      .values({
-        jobKey,
+    db.update(jobRuns)
+      .set({
         status: "error",
         message,
-        startedAt,
         finishedAt,
       })
+      .where(eq(jobRuns.id, runId))
       .run();
     db.update(cronJobs)
       .set({
@@ -515,6 +561,94 @@ async function recordJobRun(
       .run();
     return { status: "error", message };
   }
+}
+
+function insertRunningJobRun(jobKey: string, startedAt: string) {
+  try {
+    const row = db.insert(jobRuns)
+      .values({
+        jobKey,
+        status: "running",
+        message: "同步中",
+        startedAt,
+      })
+      .returning({ id: jobRuns.id })
+      .get();
+    return row.id;
+  } catch (error) {
+    if (isSqliteUniqueConstraint(error, "job_runs.job_key")) {
+      throw new JobAlreadyRunningError();
+    }
+    throw error;
+  }
+}
+
+async function recordCpaInstanceSyncRun(
+  instance: CpaInstance,
+  run: () => Promise<CpaInstanceSyncResult>,
+) {
+  const startedAt = nowIso();
+  const runId = insertRunningCpaInstanceSyncRun(instance, startedAt);
+
+  try {
+    const result = await run();
+    const finishedAt = nowIso();
+    db.update(cpaInstanceSyncRuns)
+      .set({
+        status: result.status,
+        message: result.message,
+        finishedAt,
+        rawJson: JSON.stringify(result),
+      })
+      .where(eq(cpaInstanceSyncRuns.id, runId))
+      .run();
+    return result;
+  } catch (error) {
+    const message = errorMessage(error);
+    const finishedAt = nowIso();
+    db.update(cpaInstanceSyncRuns)
+      .set({
+        status: "error",
+        message,
+        finishedAt,
+      })
+      .where(eq(cpaInstanceSyncRuns.id, runId))
+      .run();
+    throw error;
+  }
+}
+
+function insertRunningCpaInstanceSyncRun(instance: CpaInstance, startedAt: string) {
+  try {
+    const row = db.insert(cpaInstanceSyncRuns)
+      .values({
+        cpaInstanceId: instance.id,
+        status: "running",
+        message: "同步中",
+        startedAt,
+      })
+      .returning({ id: cpaInstanceSyncRuns.id })
+      .get();
+    return row.id;
+  } catch (error) {
+    if (isSqliteUniqueConstraint(error, "cpa_instance_sync_runs.cpa_instance_id")) {
+      throw new CpaInstanceAlreadySyncingError(instance);
+    }
+    throw error;
+  }
+}
+
+function isSqliteUniqueConstraint(error: unknown, targetColumn: string) {
+  if (typeof error !== "object" || error === null) {
+    return false;
+  }
+
+  const { code, message } = error as { code?: unknown; message?: unknown };
+  return code === "SQLITE_CONSTRAINT_UNIQUE" || (
+    typeof message === "string" &&
+    message.includes("UNIQUE constraint failed") &&
+    message.includes(targetColumn)
+  );
 }
 
 function stringOrNull(value: unknown) {

@@ -204,7 +204,7 @@ async function autoAssignProxy(instance: typeof cpaInstances.$inferSelect) {
   let skipped = 0;
 
   for (const authFile of unassignedAuthFiles) {
-    const proxy = candidates.find((candidate) => candidate.currentAuthFiles < candidate.maxAuthFiles);
+    const proxy = selectLeastUsedProxyCandidate(candidates);
     if (!proxy) {
       skipped += 1;
       continue;
@@ -227,6 +227,22 @@ async function autoAssignProxy(instance: typeof cpaInstances.$inferSelect) {
   }
 
   return { processed, skipped };
+}
+
+function selectLeastUsedProxyCandidate(
+  candidates: Array<{
+    id: number;
+    url: string;
+    maxAuthFiles: number;
+    currentAuthFiles: number;
+  }>,
+) {
+  return candidates
+    .filter((candidate) => candidate.currentAuthFiles < candidate.maxAuthFiles)
+    .sort((left, right) =>
+      left.currentAuthFiles - right.currentAuthFiles ||
+      left.id - right.id
+    )[0] ?? null;
 }
 
 function loadProxyCandidates(

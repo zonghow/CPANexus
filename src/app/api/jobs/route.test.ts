@@ -68,6 +68,119 @@ describe("/api/jobs", () => {
     expect(syncJob?.nextRunAt).toBe(new Date(2026, 4, 14, 15, 0, 0, 0).toISOString());
   });
 
+  it("restarts interval countdown from the last manual run time", async () => {
+    const { migrate } = await import("@/db/migrate");
+    const { getSqlite } = await import("@/db/client");
+    migrate();
+    const lastRunAt = new Date(2026, 4, 14, 14, 51, 30, 0).toISOString();
+    getSqlite()
+      .prepare("UPDATE cron_jobs SET last_run_at = ? WHERE key = 'sync-cpa-instances'")
+      .run(lastRunAt);
+    const route = await import("./route");
+
+    const response = await route.GET(
+      new Request("http://localhost/api/jobs", {
+        headers: authHeaders(),
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    const payload = (await response.json()) as {
+      jobs: Array<{
+        key: string;
+        nextRunAt: string | null;
+        secondsUntilNextRun: number | null;
+      }>;
+    };
+    const syncJob = payload.jobs.find((job) => job.key === "sync-cpa-instances");
+
+    expect(syncJob).toMatchObject({
+      nextRunAt: new Date(2026, 4, 14, 15, 1, 30, 0).toISOString(),
+      secondsUntilNextRun: 600,
+    });
+  });
+
+  it("exposes active running jobs for other browser sessions", async () => {
+    const { migrate } = await import("@/db/migrate");
+    const { getSqlite } = await import("@/db/client");
+    migrate();
+    getSqlite()
+      .prepare(`
+        INSERT INTO job_runs (job_key, status, message, started_at, finished_at)
+        VALUES ('sync-cpa-instances', 'running', '同步中', '2026-05-14T06:51:00.000Z', NULL)
+      `)
+      .run();
+    const route = await import("./route");
+
+    const response = await route.GET(
+      new Request("http://localhost/api/jobs", {
+        headers: authHeaders(),
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    const payload = (await response.json()) as {
+      jobs: Array<{
+        key: string;
+        running: boolean;
+        runningStartedAt: string | null;
+        nextRunAt: string | null;
+        secondsUntilNextRun: number | null;
+      }>;
+    };
+    const syncJob = payload.jobs.find((job) => job.key === "sync-cpa-instances");
+
+    expect(syncJob).toMatchObject({
+      running: true,
+      runningStartedAt: "2026-05-14T06:51:00.000Z",
+      nextRunAt: null,
+      secondsUntilNextRun: null,
+    });
+  });
+
+  it("exposes active CPA instance syncs for per-table loading state", async () => {
+    const { migrate } = await import("@/db/migrate");
+    const { getSqlite } = await import("@/db/client");
+    migrate();
+    const sqlite = getSqlite();
+    const cpaInstanceId = Number(
+      sqlite
+        .prepare(`
+          INSERT INTO cpa_instances (name, base_url, password, quota_refresh_path, enabled)
+          VALUES ('target', 'https://target.example.com', 'secret', '/v0/management/auth-files', 1)
+        `)
+        .run().lastInsertRowid,
+    );
+    sqlite
+      .prepare(`
+        INSERT INTO cpa_instance_sync_runs (cpa_instance_id, status, message, started_at, finished_at)
+        VALUES (?, 'running', '同步中', '2026-05-14T06:51:00.000Z', NULL)
+      `)
+      .run(cpaInstanceId);
+    const route = await import("./route");
+
+    const response = await route.GET(
+      new Request("http://localhost/api/jobs", {
+        headers: authHeaders(),
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    const payload = (await response.json()) as {
+      cpaSyncs: Array<{
+        cpaInstanceId: number;
+        startedAt: string;
+      }>;
+    };
+
+    expect(payload.cpaSyncs).toEqual([
+      {
+        cpaInstanceId,
+        startedAt: "2026-05-14T06:51:00.000Z",
+      },
+    ]);
+  });
+
   it("paginates current job execution records", async () => {
     const { migrate } = await import("@/db/migrate");
     const { getSqlite } = await import("@/db/client");

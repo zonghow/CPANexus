@@ -40,6 +40,27 @@ export function nextCronRunAfter(expression: string, from = new Date()) {
   return null;
 }
 
+export function nextCronRunAfterLastRun(
+  expression: string,
+  lastRunAt: string | Date | null | undefined,
+  from = new Date(),
+) {
+  const intervalMs = minuteIntervalMsFromCron(expression);
+  const lastRun = parseDate(lastRunAt);
+  if (!intervalMs || !lastRun) {
+    return nextCronRunAfter(expression, from);
+  }
+
+  let nextRunTime = lastRun.getTime() + intervalMs;
+  const fromTime = from.getTime();
+  if (nextRunTime <= fromTime) {
+    const missedIntervals = Math.floor((fromTime - nextRunTime) / intervalMs) + 1;
+    nextRunTime += missedIntervals * intervalMs;
+  }
+
+  return new Date(nextRunTime);
+}
+
 export function secondsUntilCronRun(expression: string, from = new Date()) {
   const nextRunAt = nextCronRunAfter(expression, from);
   if (!nextRunAt) {
@@ -47,6 +68,41 @@ export function secondsUntilCronRun(expression: string, from = new Date()) {
   }
 
   return Math.max(0, Math.ceil((nextRunAt.getTime() - from.getTime()) / 1000));
+}
+
+export function minuteIntervalMsFromCron(expression: string) {
+  const fields = expression.trim().split(/\s+/);
+  if (fields.length !== 5) {
+    return null;
+  }
+
+  const [minutes, hours, daysOfMonth, months, daysOfWeek] = fields;
+  if (hours !== "*" || daysOfMonth !== "*" || months !== "*" || daysOfWeek !== "*") {
+    return null;
+  }
+
+  if (minutes === "*" || minutes === "*/1") {
+    return minuteMs;
+  }
+
+  const match = minutes.match(/^\*\/(\d+)$/);
+  if (!match) {
+    return null;
+  }
+
+  const everyMinutes = Number(match[1]);
+  return Number.isInteger(everyMinutes) && everyMinutes >= 1 && everyMinutes <= 59
+    ? everyMinutes * minuteMs
+    : null;
+}
+
+function parseDate(value: string | Date | null | undefined) {
+  if (!value) {
+    return null;
+  }
+
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isFinite(date.getTime()) ? date : null;
 }
 
 function parseCronExpression(expression: string): CronSchedule | null {

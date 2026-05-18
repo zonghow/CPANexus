@@ -10,7 +10,8 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
+import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -54,6 +55,8 @@ const quickTimeRanges = [
   { id: "1h", label: "1小时", minutes: 60 },
   { id: "3h", label: "3小时", minutes: 180 },
   { id: "5h", label: "5小时", minutes: 300 },
+  { id: "12h", label: "12小时", minutes: 720 },
+  { id: "24h", label: "24小时", minutes: 1440 },
   { id: "today", label: "今天" },
 ] as const;
 
@@ -63,7 +66,6 @@ export function DataBoardSection({ refreshVersion }: { refreshVersion: number })
   const [timeRange, setTimeRange] = useState(defaultTodayTimeRange);
   const [activeQuickRange, setActiveQuickRange] = useState<string | null>("today");
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -78,14 +80,13 @@ export function DataBoardSection({ refreshVersion }: { refreshVersion: number })
         if (!response.ok) {
           throw new Error(payload.error ?? response.statusText);
         }
-        setError(null);
         setData(payload as DataBoardResponse);
       })
       .catch((fetchError) => {
         if (fetchError instanceof DOMException && fetchError.name === "AbortError") {
           return;
         }
-        setError(fetchError instanceof Error ? fetchError.message : String(fetchError));
+        toast.error(fetchError instanceof Error ? fetchError.message : String(fetchError));
       })
       .finally(() => {
         if (!controller.signal.aborted) {
@@ -97,17 +98,6 @@ export function DataBoardSection({ refreshVersion }: { refreshVersion: number })
   }, [refreshVersion, selectedIds, timeRange]);
 
   const allMode = selectedIds.length === 0;
-  const effectiveSelectedIds = data?.selectedCpaInstanceIds ?? [];
-  const selectedLabel = useMemo(() => {
-    if (!data) {
-      return "加载中";
-    }
-    if (allMode) {
-      return `全量启用 CPA（${effectiveSelectedIds.length} 个）`;
-    }
-
-    return `已选择 ${effectiveSelectedIds.length} 个 CPA`;
-  }, [allMode, data, effectiveSelectedIds.length]);
 
   function toggleCpa(id: number) {
     setSelectedIds((current) => {
@@ -157,38 +147,24 @@ export function DataBoardSection({ refreshVersion }: { refreshVersion: number })
   return (
     <section className="space-y-3">
       <div className="space-y-3 rounded-md border bg-card p-3">
-        <div className="flex flex-col gap-1">
-          <div className="font-medium">数据范围</div>
-          <div className="text-sm text-muted-foreground">{selectedLabel}</div>
-        </div>
-
-        <div className="space-y-2">
-          <div className="text-xs font-medium text-muted-foreground">CPA</div>
-          <div className="flex max-h-28 flex-wrap gap-2 overflow-auto">
-            <FilterTag active={allMode} onClick={resetCpaScope}>
-              全部
+        <div className="flex max-h-28 flex-wrap gap-2 overflow-auto">
+          <FilterTag active={allMode} onClick={resetCpaScope}>
+            全部
+          </FilterTag>
+          {(data?.cpaInstances ?? []).map((instance) => (
+            <FilterTag
+              key={instance.id}
+              active={!allMode && selectedIds.includes(instance.id)}
+              onClick={() => toggleCpa(instance.id)}
+            >
+              {instance.name}
             </FilterTag>
-            {(data?.cpaInstances ?? []).map((instance) => (
-              <FilterTag
-                key={instance.id}
-                active={!allMode && selectedIds.includes(instance.id)}
-                onClick={() => toggleCpa(instance.id)}
-              >
-                {instance.name}
-              </FilterTag>
-            ))}
-            {!loading && (data?.cpaInstances.length ?? 0) === 0 ? (
-              <span className="px-2 py-1 text-sm text-muted-foreground">暂无启用 CPA</span>
-            ) : null}
-          </div>
+          ))}
+          {!loading && (data?.cpaInstances.length ?? 0) === 0 ? (
+            <span className="px-2 py-1 text-sm text-muted-foreground">暂无启用 CPA</span>
+          ) : null}
         </div>
       </div>
-
-      {error ? (
-        <div className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-900">
-          {error}
-        </div>
-      ) : null}
 
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
         <MetricCard label="账号数量" value={data?.stats.accountCount ?? 0} sub={`${data?.stats.availableAccountCount ?? 0} 可用`} />

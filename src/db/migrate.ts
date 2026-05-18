@@ -125,6 +125,22 @@ export function migrate() {
       finished_at TEXT,
       raw_json TEXT
     );
+    CREATE UNIQUE INDEX IF NOT EXISTS job_runs_active_key_unique
+      ON job_runs(job_key)
+      WHERE finished_at IS NULL;
+
+    CREATE TABLE IF NOT EXISTS cpa_instance_sync_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      cpa_instance_id INTEGER NOT NULL REFERENCES cpa_instances(id) ON DELETE CASCADE,
+      status TEXT NOT NULL,
+      message TEXT,
+      started_at TEXT NOT NULL,
+      finished_at TEXT,
+      raw_json TEXT
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS cpa_instance_sync_runs_active_instance_unique
+      ON cpa_instance_sync_runs(cpa_instance_id)
+      WHERE finished_at IS NULL;
 
   `);
 

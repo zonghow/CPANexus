@@ -150,6 +150,8 @@ type CronJob = {
   lastRunAt: string | null;
   lastStatus: string | null;
   lastError: string | null;
+  running: boolean;
+  runningStartedAt: string | null;
   nextRunAt: string | null;
   secondsUntilNextRun: number | null;
 };
@@ -173,6 +175,10 @@ type JobRunsPagination = {
 type JobsApiResponse = {
   jobs: CronJob[];
   runs: JobRun[];
+  cpaSyncs: Array<{
+    cpaInstanceId: number;
+    startedAt: string;
+  }>;
   runsPagination: JobRunsPagination;
 };
 
@@ -306,8 +312,10 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
   const [runsPagination, setRunsPagination] = useState<JobRunsPagination>(defaultJobRunsPagination);
   const runsPaginationRef = useRef<JobRunsPagination>(defaultJobRunsPagination);
   const scheduledSyncRunRef = useRef<string | null>(null);
-  const [message, setMessage] = useState("");
+  const remoteSyncRunningRef = useRef(false);
+  const remoteCpaSyncingIdsRef = useRef<Set<number>>(new Set());
   const [updatingCpaIds, setUpdatingCpaIds] = useState<Set<number>>(() => new Set());
+  const [remoteUpdatingCpaIds, setRemoteUpdatingCpaIds] = useState<Set<number>>(() => new Set());
   const [runningJobKeys, setRunningJobKeys] = useState<Set<string>>(() => new Set());
   const [proxyChecks, setProxyChecks] = useState<Record<number, ProxyCheckResult>>({});
   const [checkingProxies, setCheckingProxies] = useState(false);
@@ -355,6 +363,7 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
   const applyJobsResponse = useCallback((jobRes: JobsApiResponse) => {
     setJobs(jobRes.jobs);
     setRuns(jobRes.runs);
+    setRemoteUpdatingCpaIds(new Set((jobRes.cpaSyncs ?? []).map((sync) => sync.cpaInstanceId)));
     const nextRunsPagination = jobRes.runsPagination ?? defaultJobRunsPagination;
     runsPaginationRef.current = nextRunsPagination;
     setRunsPagination(nextRunsPagination);
@@ -395,7 +404,7 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
       applyJobsResponse(jobRes);
       setDataRefreshVersion((version) => version + 1);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : String(error));
+      toast.error(error instanceof Error ? error.message : String(error));
     }
   }, [applyJobsResponse]);
 
@@ -406,6 +415,39 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
 
     return () => window.clearTimeout(timer);
   }, [loadAll]);
+
+  useEffect(() => {
+    let stopped = false;
+    const pollJobs = async () => {
+      try {
+        const jobRes = await fetchJobs();
+        if (stopped) {
+          return;
+        }
+
+        const syncRunning = Boolean(jobRes.jobs.find((job) => job.key === syncJobKey)?.running);
+        const wasSyncRunning = remoteSyncRunningRef.current;
+        const cpaSyncingIds = new Set((jobRes.cpaSyncs ?? []).map((sync) => sync.cpaInstanceId));
+        const hadCpaSyncing = remoteCpaSyncingIdsRef.current.size > 0;
+        remoteSyncRunningRef.current = syncRunning;
+        remoteCpaSyncingIdsRef.current = cpaSyncingIds;
+        if ((wasSyncRunning && !syncRunning) || (hadCpaSyncing && cpaSyncingIds.size === 0)) {
+          await loadAll({ runsPage: 1 });
+        }
+      } catch {
+        // Keep the global polling quiet; visible actions still surface errors directly.
+      }
+    };
+
+    const timer = window.setInterval(() => {
+      void pollJobs();
+    }, 3000);
+
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [fetchJobs, loadAll]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
@@ -420,7 +462,11 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
     () => secondsUntilJobRun(syncJob, nowMs),
     [syncJob, nowMs],
   );
-  const isSyncJobRunning = runningJobKeys.has(syncJobKey);
+  const isSyncJobRunning = runningJobKeys.has(syncJobKey) || Boolean(syncJob?.running);
+  const effectiveUpdatingCpaIds = useMemo(
+    () => new Set([...updatingCpaIds, ...remoteUpdatingCpaIds]),
+    [remoteUpdatingCpaIds, updatingCpaIds],
+  );
   const syncButtonLabel = formatSyncButtonLabel(syncJob, syncCountdownSeconds, isSyncJobRunning);
   const syncButtonTitle = formatSyncButtonTitle(syncJob, syncCountdownSeconds, isSyncJobRunning);
 
@@ -453,7 +499,7 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
       await waitForScheduledSyncCompletion(scheduledRunAt);
       await loadAll({ runsPage: 1 });
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : String(error));
+      toast.error(error instanceof Error ? error.message : String(error));
     } finally {
       markCpaTablesUpdating(updatingIds, false);
       markJobRunning(syncJobKey, false);
@@ -526,7 +572,7 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
     setInstanceForm(emptyInstance);
     setEditingInstanceId(null);
     setInstanceDialogOpen(false);
-    setMessage("CPA实例已保存");
+    toast.success("CPA实例已保存");
     await loadAll();
   }
 
@@ -540,7 +586,6 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
     setProxyForm(emptyProxy);
     setEditingProxyId(null);
     setProxyDialogOpen(false);
-    setMessage("");
     toast.success("代理已保存");
     await loadAll();
   }
@@ -557,7 +602,6 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
         cpaInstanceIds: proxy.cpaInstanceIds,
       }),
     });
-    setMessage("");
     toast.success(enabled ? "代理已启用" : "代理已停用");
     await loadAll();
   }
@@ -590,9 +634,13 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
         const result = await mutate<{ status: string; message: string }>(`/api/jobs/${encodeURIComponent(key)}/run`, {
           method: "POST",
         });
-        setMessage(result.message);
+        toast.success(result.message);
         await loadAll({ runsPage: 1 });
       });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      toast.error(errorMessage);
+      await fetchJobs({ runsPage: 1 });
     } finally {
       setRunningJobKeys((current) => {
         const next = new Set(current);
@@ -614,9 +662,9 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
         method: "PATCH",
         body: JSON.stringify({ id, enabled }),
       });
-      setMessage(enabled ? "CPA实例已启用" : "CPA实例已停用");
+      toast.success(enabled ? "CPA实例已启用" : "CPA实例已停用");
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : String(error));
+      toast.error(error instanceof Error ? error.message : String(error));
     } finally {
       await loadAll();
     }
@@ -627,12 +675,10 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
     try {
       await withUpdatingCpaTables([sourceCpaInstanceId], async () => {
         await mutate(`/api/auth-files/${id}`, { method: "DELETE" });
-        setMessage("");
         toast.success("账号已删除");
         await loadAll();
       });
     } catch (error) {
-      setMessage("");
       toast.error(error instanceof Error ? error.message : String(error));
     }
   }
@@ -645,12 +691,10 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
           method: "PATCH",
           body: JSON.stringify({ targetCpaInstanceId }),
         });
-        setMessage("");
         toast.success("账号已移动");
         await loadAll();
       });
     } catch (error) {
-      setMessage("");
       toast.error(error instanceof Error ? error.message : String(error));
     }
   }
@@ -663,12 +707,10 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
           method: "PATCH",
           body: JSON.stringify({ disabled }),
         });
-        setMessage("");
         toast.success(disabled ? "账号已停用" : "账号已启用，等待配额刷新");
         await loadAll();
       });
     } catch (error) {
-      setMessage("");
       toast.error(error instanceof Error ? error.message : String(error));
     }
   }
@@ -681,12 +723,10 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
           method: "PATCH",
           body: JSON.stringify({ proxyUrl }),
         });
-        setMessage("");
         toast.success(proxyUrl ? "账号代理已更新" : "账号代理已清除");
         await loadAll();
       });
     } catch (error) {
-      setMessage("");
       toast.error(error instanceof Error ? error.message : String(error));
     }
   }
@@ -702,7 +742,6 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
             body: JSON.stringify({ action: "refreshQuota" }),
           },
         );
-        setMessage("");
         if (result.status === "success") {
           toast.success(`${result.instance}：${result.message}`);
         } else {
@@ -711,7 +750,6 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
         await loadAll();
       });
     } catch (error) {
-      setMessage("");
       toast.error(error instanceof Error ? error.message : String(error));
     }
   }
@@ -750,7 +788,6 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
           body: JSON.stringify({ action: "upload", mode, entries }),
         },
       );
-      setMessage("");
       await loadAll();
     });
     return result;
@@ -769,7 +806,6 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
           body: JSON.stringify({ files }),
         },
       );
-      setMessage("");
       await loadAll();
     });
     return result;
@@ -784,7 +820,6 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
     target: BatchAuthFileTarget = "selected",
   ) {
     if (authFileIds.length === 0) {
-      setMessage("");
       toast.info(`没有${subject}可处理`);
       return;
     }
@@ -802,12 +837,10 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
             ),
           },
         );
-        setMessage("");
         toast.success(`${successVerb} ${result.processed} 个${subject}`);
         await loadAll();
       });
     } catch (error) {
-      setMessage("");
       toast.error(error instanceof Error ? error.message : String(error));
     }
   }
@@ -822,7 +855,6 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
             body: JSON.stringify({ action: "autoAssignProxy" }),
           },
         );
-        setMessage("");
         if (result.processed > 0 && result.skipped) {
           toast.success(`已自动分配代理 ${result.processed} 个，${result.skipped} 个因容量不足跳过`);
         } else if (result.processed > 0) {
@@ -835,7 +867,6 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
         await loadAll();
       });
     } catch (error) {
-      setMessage("");
       toast.error(error instanceof Error ? error.message : String(error));
     }
   }
@@ -847,12 +878,10 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
           `/api/cpa-instances/${cpaInstanceId}/sync`,
           { method: "POST" },
         );
-        setMessage("");
         toast.success(`${result.instance}：${result.message}`);
         await loadAll();
       });
     } catch (error) {
-      setMessage("");
       toast.error(error instanceof Error ? error.message : String(error));
     }
   }
@@ -876,7 +905,6 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
         method: "POST",
         body: JSON.stringify({ action: "callback", redirectUrl }),
       });
-      setMessage("");
       await loadAll();
     });
   }
@@ -938,12 +966,6 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
           </header>
 
           <div className="space-y-3 p-3">
-            {message ? (
-              <div className="rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-sm text-sky-900">
-                {message}
-              </div>
-            ) : null}
-
             {activeSection === "dashboard" ? (
               <DataBoardSection refreshVersion={dataRefreshVersion} />
             ) : null}
@@ -977,7 +999,7 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
                 groups={authGroups}
                 quotaGroups={quotaGroups}
                 proxies={proxies}
-                updatingCpaIds={updatingCpaIds}
+                updatingCpaIds={effectiveUpdatingCpaIds}
                 nowMs={nowMs}
                 onDeleteAuthFile={deleteAuthFile}
                 onMoveAuthFile={moveAuthFile}
@@ -1018,7 +1040,6 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
                 onCheckAll={checkAllProxies}
                 onDelete={async (id) => {
                   await mutate(`/api/proxies/${id}`, { method: "DELETE" });
-                  setMessage("");
                   toast.success("代理已删除");
                   await loadAll();
                 }}
@@ -1037,7 +1058,7 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
                     method: "PUT",
                     body: JSON.stringify({ cron: job.cron, enabled: job.enabled }),
                   });
-                  setMessage("定时任务已保存");
+                  toast.success("定时任务已保存");
                   await loadAll();
                 }}
               />
@@ -2283,11 +2304,6 @@ function AuthFilesSection({
                   )
                 }
               />
-              {rtLogin.error ? (
-                <div className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-900">
-                  {rtLogin.error}
-                </div>
-              ) : null}
             </div>
           ) : null}
           {rtLogin && rtLogin.stage !== "input" ? (
@@ -2361,11 +2377,6 @@ function AuthFilesSection({
               </table>
             </div>
           ) : null}
-          {rtLogin?.error && rtLogin.stage !== "input" ? (
-            <div className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-900">
-              {rtLogin.error}
-            </div>
-          ) : null}
           <DialogFooter>
             <Button
               type="button"
@@ -2429,11 +2440,6 @@ function AuthFilesSection({
             ) : null}
             {oauthLogin && !oauthLogin.loading ? (
               <>
-                {oauthLogin.error ? (
-                  <div className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-900">
-                    {oauthLogin.error}
-                  </div>
-                ) : null}
                 <div className="grid gap-2">
                   <Label htmlFor="codex-oauth-url">登录链接</Label>
                   <div className="flex gap-2">
@@ -2526,9 +2532,9 @@ function AuthFilesSection({
             </DialogDescription>
           </DialogHeader>
           {bulkExceptionTarget?.action === "delete" ? (
-            <div className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-900">
+            <p className="text-sm text-muted-foreground">
               删除会从 CPA 中移除认证文件，并清理本地账号和配额记录。
-            </div>
+            </p>
           ) : null}
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => setBulkExceptionTarget(null)}>
@@ -2630,15 +2636,13 @@ function CompactAuthFileTable({
   return (
     <div className="overflow-x-auto">
       <div
-        className="max-h-[calc(100vh-260px)] max-w-none overflow-y-auto"
-        style={{ width: 704, minWidth: 704, maxWidth: 704 }}
+        className="max-h-[calc(100vh-260px)] min-w-[704px] max-w-none overflow-y-auto"
       >
         <table
-          className="table-fixed caption-bottom text-sm"
-          style={{ width: 704, minWidth: 704, maxWidth: 704 }}
+          className="w-full min-w-[704px] table-fixed caption-bottom text-sm"
         >
           <colgroup>
-            <col style={{ width: 260 }} />
+            <col />
             <col style={{ width: 96 }} />
             <col style={{ width: 96 }} />
             <col style={{ width: 64 }} />
@@ -2648,7 +2652,7 @@ function CompactAuthFileTable({
           </colgroup>
           <TableHeader>
             <TableRow className="h-8">
-              <TableHead className="sticky top-0 z-10 w-[260px] bg-card px-3 py-1 text-xs shadow-[0_1px_0_var(--border)]">账号</TableHead>
+              <TableHead className="sticky top-0 z-10 bg-card px-3 py-1 text-xs shadow-[0_1px_0_var(--border)]">账号</TableHead>
               <TableHead className="sticky top-0 z-10 w-24 bg-card px-2 py-1 text-xs shadow-[0_1px_0_var(--border)]">
                 <CompactPercentHeader windowLabel="5h" />
               </TableHead>
@@ -2674,7 +2678,7 @@ function CompactAuthFileTable({
                   key={row.id}
                   className={cn("h-9", row.disabled && "bg-muted/30 text-muted-foreground")}
                 >
-                  <TableCell className="w-[260px] max-w-[260px] px-3 py-1">
+                  <TableCell className="px-3 py-1">
                     <div className="flex min-w-0 items-center gap-2">
                       <span
                         className={cn(
