@@ -33,4 +33,24 @@ describe("sortAccountRows", () => {
 
     expect(sortAccountRows(rows).map((row) => row.fileName)).toEqual(["a.json", "b.json"]);
   });
+
+  it("always pushes limited, disabled, and exception accounts to the end", () => {
+    const rows = [
+      { email: "z-normal-free@example.com", subscriptionType: "free", quotaStatus: "available" },
+      { email: "a-limited-pro@example.com", subscriptionType: "pro", quotaStatus: "limited" },
+      { email: "a-normal-plus@example.com", subscriptionType: "plus", quotaStatus: "available" },
+      { email: "a-exception-pro@example.com", subscriptionType: "pro", quotaStatus: "exception" },
+      { email: "a-disabled-pro@example.com", subscriptionType: "pro", quotaStatus: "disabled" },
+      { email: "a-normal-pro@example.com", subscriptionType: "pro", quotaStatus: "available" },
+    ];
+
+    expect(sortAccountRows(rows).map((row) => row.email)).toEqual([
+      "a-normal-pro@example.com",
+      "a-normal-plus@example.com",
+      "z-normal-free@example.com",
+      "a-limited-pro@example.com",
+      "a-disabled-pro@example.com",
+      "a-exception-pro@example.com",
+    ]);
+  });
 });

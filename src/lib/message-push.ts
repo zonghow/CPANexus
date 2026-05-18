@@ -14,6 +14,7 @@ import {
 } from "@/db/schema";
 
 import { averageRemainingPercent } from "./quota-summary";
+import { resolveAccountQuotaStatus } from "./account-quota-status";
 
 export const messagePushTriggerTypes = [
   "account_exception",
@@ -37,6 +38,14 @@ type CpaSnapshot = {
   exceptionSummary: string;
   remaining5hPercent: number | null;
   remainingWeekPercent: number | null;
+};
+
+type QuotaSnapshotForStatus = {
+  authFileName: string | null;
+  email: string | null;
+  available: boolean;
+  exception: string | null;
+  rawJson: string | null;
 };
 
 type TriggerEvaluation = {
@@ -199,7 +208,9 @@ function buildCpaSnapshot(cpaInstanceId: number, cpaName: string): CpaSnapshot {
     .where(eq(quotaSnapshots.cpaInstanceId, cpaInstanceId))
     .all();
   const activeAuthFiles = files.filter((file) => !file.disabled);
-  const exceptionFiles = activeAuthFiles.filter(isExceptionAuthFile);
+  const exceptionFiles = activeAuthFiles.filter((file) =>
+    isExceptionAuthFile(file, quotas),
+  );
 
   return {
     cpaName,
@@ -400,11 +411,29 @@ function upsertActiveState(
     .run();
 }
 
-function isExceptionAuthFile(file: AuthFile) {
-  return (
-    !file.available &&
-    (file.status === "异常" || Boolean(file.statusMessage?.trim()))
-  );
+function isExceptionAuthFile(file: AuthFile, quotas: QuotaSnapshotForStatus[]) {
+  const quota = matchingQuotaSnapshot(file, quotas);
+  const status = resolveAccountQuotaStatus({
+    disabled: file.disabled,
+    available: quota?.available ?? file.available,
+    exception: quota?.exception ?? file.statusMessage,
+    rawJson: quota?.rawJson ?? null,
+  });
+
+  return status.state === "exception";
+}
+
+function matchingQuotaSnapshot(file: AuthFile, quotas: QuotaSnapshotForStatus[]) {
+  const email = file.email?.toLowerCase() ?? null;
+  return quotas.find((snapshot) => {
+    if (snapshot.authFileName && snapshot.authFileName === file.fileName) {
+      return true;
+    }
+    if (email && snapshot.email?.toLowerCase() === email) {
+      return true;
+    }
+    return false;
+  }) ?? null;
 }
 
 function parseHeadersJson(value: string | null) {

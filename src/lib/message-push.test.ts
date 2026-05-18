@@ -111,6 +111,41 @@ describe("message push evaluation", () => {
     });
   });
 
+  it("does not treat rate-limited accounts as account exceptions", async () => {
+    const sqlite = await setupSqlite();
+    const cpaInstanceId = insertInstance(sqlite, "Limited CPA");
+    insertAuthFile(sqlite, cpaInstanceId, "limited@example.com", false);
+    insertQuotaSnapshot(sqlite, {
+      cpaInstanceId,
+      authFileName: "limited@example.com.json",
+      email: "limited@example.com",
+      available: false,
+      exception: null,
+      rawJson: JSON.stringify({
+        rate_limit: { limit_reached: true },
+        rate_limit_reached_type: { type: "rate_limit_reached" },
+      }),
+    });
+    insertPolicy(sqlite, {
+      name: "exceptions",
+      triggerType: "account_exception",
+      thresholdPercent: null,
+      bodyTemplate: "{{msg}}",
+    });
+
+    const { evaluateMessagePushPoliciesForCpa } = await import("./message-push");
+
+    await evaluateMessagePushPoliciesForCpa(cpaInstanceId);
+
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+    expect(
+      sqlite.prepare("SELECT COUNT(*) AS count FROM message_push_deliveries").get(),
+    ).toEqual({ count: 0 });
+    expect(
+      sqlite.prepare("SELECT COUNT(*) AS count FROM message_push_states").get(),
+    ).toEqual({ count: 0 });
+  });
+
   it("records browser notifications without calling an external webhook", async () => {
     const sqlite = await setupSqlite();
     const cpaInstanceId = insertInstance(sqlite, "Browser CPA");
@@ -306,6 +341,41 @@ function replaceQuotaSnapshots(
         usage5hPercent,
       );
   }
+}
+
+function insertQuotaSnapshot(
+  sqlite: Database.Database,
+  values: {
+    cpaInstanceId: number;
+    authFileName: string;
+    email: string;
+    available: boolean;
+    exception: string | null;
+    rawJson: string | null;
+  },
+) {
+  sqlite
+    .prepare(`
+      INSERT INTO quota_snapshots (
+        cpa_instance_id,
+        auth_file_name,
+        email,
+        usage_5h_percent,
+        usage_week_percent,
+        available,
+        exception,
+        raw_json
+      )
+      VALUES (?, ?, ?, 100, 31, ?, ?, ?)
+    `)
+    .run(
+      values.cpaInstanceId,
+      values.authFileName,
+      values.email,
+      values.available ? 1 : 0,
+      values.exception,
+      values.rawJson,
+    );
 }
 
 function insertPolicy(

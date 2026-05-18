@@ -1,5 +1,8 @@
+import type { AccountQuotaState } from "./account-quota-status";
+
 export type AccountSortRow = {
   subscriptionType: string | null;
+  quotaStatus?: AccountQuotaState;
   email?: string | null;
   fileName?: string | null;
 };
@@ -30,6 +33,11 @@ export function sortAccountRows<T extends AccountSortRow>(rows: T[]) {
 }
 
 function compareAccountRows(a: AccountSortRow, b: AccountSortRow) {
+  const statusDiff = accountStatusSortRank(a.quotaStatus) - accountStatusSortRank(b.quotaStatus);
+  if (statusDiff !== 0) {
+    return statusDiff;
+  }
+
   const tierDiff = subscriptionSortRank(a.subscriptionType) - subscriptionSortRank(b.subscriptionType);
   if (tierDiff !== 0) {
     return tierDiff;
@@ -44,6 +52,19 @@ function subscriptionSortRank(value: string | null) {
   }
 
   return knownSubscriptionRanks[value.trim().toLowerCase()] ?? 98;
+}
+
+function accountStatusSortRank(value: AccountQuotaState | undefined) {
+  if (value === "limited") {
+    return 1;
+  }
+  if (value === "disabled") {
+    return 2;
+  }
+  if (value === "exception") {
+    return 3;
+  }
+  return 0;
 }
 
 function accountSortName(row: AccountSortRow) {
