@@ -87,4 +87,58 @@ describe("migrate", () => {
       ]),
     );
   });
+
+  it("creates message push policy storage", async () => {
+    const { migrate } = await import("./migrate");
+    const { getSqlite } = await import("./client");
+
+    migrate();
+    const sqlite = getSqlite();
+
+    const tables = sqlite
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+      .all() as Array<{ name: string }>;
+    expect(tables.map((table) => table.name)).toEqual(
+      expect.arrayContaining([
+        "message_push_policies",
+        "message_push_policy_cpa_instances",
+        "message_push_states",
+        "message_push_deliveries",
+      ]),
+    );
+
+    const policyColumns = sqlite
+      .prepare("PRAGMA table_info(message_push_policies)")
+      .all() as Array<{ name: string }>;
+    expect(policyColumns.map((column) => column.name)).toEqual(
+      expect.arrayContaining([
+        "id",
+        "name",
+        "delivery_type",
+        "trigger_type",
+        "threshold_percent",
+        "scope_type",
+        "webhook_url",
+        "headers_json",
+        "body_template",
+        "enabled",
+        "created_at",
+        "updated_at",
+      ]),
+    );
+
+    const stateIndexes = sqlite
+      .prepare("PRAGMA index_list(message_push_states)")
+      .all() as Array<{ name: string }>;
+    expect(stateIndexes.map((index) => index.name)).toEqual(
+      expect.arrayContaining(["message_push_states_unique"]),
+    );
+
+    const deliveryColumns = sqlite
+      .prepare("PRAGMA table_info(message_push_deliveries)")
+      .all() as Array<{ name: string }>;
+    expect(deliveryColumns.map((column) => column.name)).toEqual(
+      expect.arrayContaining(["delivery_type"]),
+    );
+  });
 });

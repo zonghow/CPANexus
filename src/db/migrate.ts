@@ -142,7 +142,69 @@ export function migrate() {
       ON cpa_instance_sync_runs(cpa_instance_id)
       WHERE finished_at IS NULL;
 
+    CREATE TABLE IF NOT EXISTS message_push_policies (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      delivery_type TEXT NOT NULL DEFAULT 'webhook',
+      trigger_type TEXT NOT NULL,
+      threshold_percent REAL,
+      scope_type TEXT NOT NULL DEFAULT 'all_enabled',
+      webhook_url TEXT NOT NULL,
+      headers_json TEXT NOT NULL DEFAULT '{}',
+      body_template TEXT NOT NULL,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS message_push_policy_cpa_instances (
+      policy_id INTEGER NOT NULL REFERENCES message_push_policies(id) ON DELETE CASCADE,
+      cpa_instance_id INTEGER NOT NULL REFERENCES cpa_instances(id) ON DELETE CASCADE,
+      PRIMARY KEY (policy_id, cpa_instance_id)
+    );
+    CREATE INDEX IF NOT EXISTS message_push_policy_cpa_instances_cpa_idx
+      ON message_push_policy_cpa_instances(cpa_instance_id);
+
+    CREATE TABLE IF NOT EXISTS message_push_states (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      policy_id INTEGER NOT NULL REFERENCES message_push_policies(id) ON DELETE CASCADE,
+      cpa_instance_id INTEGER NOT NULL REFERENCES cpa_instances(id) ON DELETE CASCADE,
+      trigger_key TEXT NOT NULL,
+      active INTEGER NOT NULL DEFAULT 0,
+      activated_at TEXT,
+      recovered_at TEXT,
+      last_sent_at TEXT,
+      last_value REAL,
+      last_message TEXT
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS message_push_states_unique
+      ON message_push_states(policy_id, cpa_instance_id, trigger_key);
+
+    CREATE TABLE IF NOT EXISTS message_push_deliveries (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      policy_id INTEGER NOT NULL REFERENCES message_push_policies(id) ON DELETE CASCADE,
+      cpa_instance_id INTEGER NOT NULL REFERENCES cpa_instances(id) ON DELETE CASCADE,
+      delivery_type TEXT NOT NULL DEFAULT 'webhook',
+      trigger_key TEXT NOT NULL,
+      status TEXT NOT NULL,
+      message TEXT NOT NULL,
+      response_status INTEGER,
+      response_body TEXT,
+      error TEXT,
+      sent_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS message_push_deliveries_policy_time_idx
+      ON message_push_deliveries(policy_id, sent_at);
+
   `);
+
+  if (!hasColumn(sqlite, "message_push_policies", "delivery_type")) {
+    sqlite.exec("ALTER TABLE message_push_policies ADD COLUMN delivery_type TEXT NOT NULL DEFAULT 'webhook'");
+  }
+
+  if (!hasColumn(sqlite, "message_push_deliveries", "delivery_type")) {
+    sqlite.exec("ALTER TABLE message_push_deliveries ADD COLUMN delivery_type TEXT NOT NULL DEFAULT 'webhook'");
+  }
 
   const seed = sqlite.prepare(`
     INSERT OR IGNORE INTO cron_jobs (key, name, cron, enabled)

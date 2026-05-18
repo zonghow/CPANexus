@@ -10,6 +10,7 @@ const sections = new Set<SectionId>([
   "instances",
   "auth",
   "proxies",
+  "message-push",
   "jobs",
 ]);
 

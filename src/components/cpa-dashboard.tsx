@@ -3,6 +3,7 @@
 import {
   Activity,
   BarChart3,
+  Bell,
   ChevronLeft,
   ChevronRight,
   Copy,
@@ -65,6 +66,7 @@ import {
 } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
 import { DataBoardSection } from "@/components/data-board-section";
+import { MessagePushSection } from "@/components/message-push-section";
 import { resolveAccountQuotaStatus, type AccountQuotaState } from "@/lib/account-quota-status";
 import { sortAccountRows } from "@/lib/account-sort";
 import { onlyEnabledCpaGroups } from "@/lib/cpa-groups";
@@ -240,6 +242,7 @@ const navItems = [
   { id: "dashboard", label: "数据看板", icon: BarChart3, href: "/dashboard" },
   { id: "instances", label: "CPA管理", icon: Server, href: "/instances" },
   { id: "proxies", label: "代理管理", icon: Network, href: "/proxies" },
+  { id: "message-push", label: "消息推送", icon: Bell, href: "/message-push" },
   { id: "jobs", label: "定时任务", icon: Activity, href: "/jobs" },
 ] as const;
 
@@ -1044,6 +1047,10 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
                   await loadAll();
                 }}
               />
+            ) : null}
+
+            {activeSection === "message-push" ? (
+              <MessagePushSection />
             ) : null}
 
             {activeSection === "jobs" ? (

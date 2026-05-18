@@ -155,9 +155,95 @@ export const cpaInstanceSyncRuns = sqliteTable("cpa_instance_sync_runs", {
   rawJson: text("raw_json"),
 });
 
+export const messagePushPolicies = sqliteTable("message_push_policies", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull(),
+  deliveryType: text("delivery_type").notNull().default("webhook"),
+  triggerType: text("trigger_type").notNull(),
+  thresholdPercent: real("threshold_percent"),
+  scopeType: text("scope_type").notNull().default("all_enabled"),
+  webhookUrl: text("webhook_url").notNull(),
+  headersJson: text("headers_json").notNull().default("{}"),
+  bodyTemplate: text("body_template").notNull(),
+  enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+
+export const messagePushPolicyCpaInstances = sqliteTable(
+  "message_push_policy_cpa_instances",
+  {
+    policyId: integer("policy_id")
+      .notNull()
+      .references(() => messagePushPolicies.id, { onDelete: "cascade" }),
+    cpaInstanceId: integer("cpa_instance_id")
+      .notNull()
+      .references(() => cpaInstances.id, { onDelete: "cascade" }),
+  },
+  (table) => [
+    primaryKey({ columns: [table.policyId, table.cpaInstanceId] }),
+    index("message_push_policy_cpa_instances_cpa_idx").on(table.cpaInstanceId),
+  ],
+);
+
+export const messagePushStates = sqliteTable(
+  "message_push_states",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    policyId: integer("policy_id")
+      .notNull()
+      .references(() => messagePushPolicies.id, { onDelete: "cascade" }),
+    cpaInstanceId: integer("cpa_instance_id")
+      .notNull()
+      .references(() => cpaInstances.id, { onDelete: "cascade" }),
+    triggerKey: text("trigger_key").notNull(),
+    active: integer("active", { mode: "boolean" }).notNull().default(false),
+    activatedAt: text("activated_at"),
+    recoveredAt: text("recovered_at"),
+    lastSentAt: text("last_sent_at"),
+    lastValue: real("last_value"),
+    lastMessage: text("last_message"),
+  },
+  (table) => [
+    uniqueIndex("message_push_states_unique").on(
+      table.policyId,
+      table.cpaInstanceId,
+      table.triggerKey,
+    ),
+  ],
+);
+
+export const messagePushDeliveries = sqliteTable(
+  "message_push_deliveries",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    policyId: integer("policy_id")
+      .notNull()
+      .references(() => messagePushPolicies.id, { onDelete: "cascade" }),
+    cpaInstanceId: integer("cpa_instance_id")
+      .notNull()
+      .references(() => cpaInstances.id, { onDelete: "cascade" }),
+    deliveryType: text("delivery_type").notNull().default("webhook"),
+    triggerKey: text("trigger_key").notNull(),
+    status: text("status").notNull(),
+    message: text("message").notNull(),
+    responseStatus: integer("response_status"),
+    responseBody: text("response_body"),
+    error: text("error"),
+    sentAt: text("sent_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    index("message_push_deliveries_policy_time_idx").on(
+      table.policyId,
+      table.sentAt,
+    ),
+  ],
+);
+
 export type CpaInstance = typeof cpaInstances.$inferSelect;
 export type NewCpaInstance = typeof cpaInstances.$inferInsert;
 export type AuthFile = typeof authFiles.$inferSelect;
 export type CronJob = typeof cronJobs.$inferSelect;
 export type DashboardMetricSnapshot = typeof dashboardMetricSnapshots.$inferSelect;
 export type Proxy = typeof proxies.$inferSelect;
+export type MessagePushPolicy = typeof messagePushPolicies.$inferSelect;

@@ -22,6 +22,7 @@ import {
   refreshRemoteQuotas,
   type RemoteAuthFile,
 } from "./cpa-client";
+import { evaluateMessagePushPoliciesForCpa } from "./message-push";
 
 export const jobKeys = {
   sync: "sync-cpa-instances",
@@ -129,6 +130,7 @@ async function performCpaInstanceSync(instance: CpaInstance): Promise<CpaInstanc
     await syncAuthFilesForInstance(instance, remoteFiles);
     const quotaResult = await syncQuotasForInstance(instance, remoteFiles);
     recordDashboardMetricSnapshot(instance.id, nowIso());
+    await evaluateMessagePushPoliciesForCpa(instance.id);
 
     db.update(cpaInstances)
       .set({
