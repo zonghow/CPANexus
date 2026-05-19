@@ -1450,7 +1450,7 @@ function AuthFilesSection({
     : [];
   const proxyOptions = proxyTarget ? proxiesForCpa(proxyTarget.cpaInstanceId) : [];
 
-  function openRtLogin(instance: CpaInstance, mode: RtLoginMode) {
+  function openRtLogin(instance: CpaInstance, mode: RtLoginMode = "rt") {
     setOpenLoginMenuInstanceId(null);
     setRtLogin({
       instance,
@@ -1954,18 +1954,10 @@ function AuthFilesSection({
                         <button
                           type="button"
                           className="flex w-full items-center gap-1.5 rounded px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground"
-                          onClick={() => openRtLogin(group.instance, "rt")}
+                          onClick={() => openRtLogin(group.instance)}
                         >
                           <LogIn className="h-3 w-3" />
-                          RT登录
-                        </button>
-                        <button
-                          type="button"
-                          className="flex w-full items-center gap-1.5 rounded px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground"
-                          onClick={() => openRtLogin(group.instance, "mobile_rt")}
-                        >
-                          <LogIn className="h-3 w-3" />
-                          Mobile RT登录
+                          RT 登录
                         </button>
                         <button
                           type="button"
@@ -2329,15 +2321,56 @@ function AuthFilesSection({
           }
         }}
       >
-        <DialogContent className="sm:max-w-3xl">
+        <DialogContent className={cn(rtLogin?.stage === "input" ? "sm:max-w-2xl" : "sm:max-w-3xl")}>
           <DialogHeader>
-            <DialogTitle>{rtLogin ? rtLoginModeLabel(rtLogin.mode) : "RT登录"}</DialogTitle>
+            <DialogTitle>RT 登录</DialogTitle>
             <DialogDescription>
               {rtLogin?.instance.name ?? "当前 CPA"} 的 RT 登录。
             </DialogDescription>
           </DialogHeader>
           {rtLogin?.stage === "input" ? (
             <div className="grid gap-3">
+              <div className="grid gap-2">
+                <Label>登录类型</Label>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button
+                    type="button"
+                    size="xs"
+                    variant="ghost"
+                    className={cn(
+                      "h-9 rounded-full border px-4 text-sm font-semibold shadow-none",
+                      rtLogin.mode === "rt"
+                        ? "border-neutral-950 bg-neutral-950 text-white hover:bg-neutral-900 hover:text-white"
+                        : "border-border bg-background text-muted-foreground hover:bg-muted/60 hover:text-foreground",
+                    )}
+                    onClick={() =>
+                      setRtLogin((current) =>
+                        current ? { ...current, mode: "rt", error: null } : current,
+                      )
+                    }
+                  >
+                    RT
+                  </Button>
+                  <Button
+                    type="button"
+                    size="xs"
+                    variant="ghost"
+                    className={cn(
+                      "h-9 rounded-full border px-4 text-sm font-semibold shadow-none",
+                      rtLogin.mode === "mobile_rt"
+                        ? "border-neutral-950 bg-neutral-950 text-white hover:bg-neutral-900 hover:text-white"
+                        : "border-border bg-background text-muted-foreground hover:bg-muted/60 hover:text-foreground",
+                    )}
+                    onClick={() =>
+                      setRtLogin((current) =>
+                        current ? { ...current, mode: "mobile_rt", error: null } : current,
+                      )
+                    }
+                  >
+                    Mobile RT
+                  </Button>
+                </div>
+              </div>
               <div className="grid gap-2">
                 <Label>登录方式</Label>
                 <div className="flex flex-wrap items-center gap-2">
@@ -2385,18 +2418,20 @@ function AuthFilesSection({
                   ) : null}
                 </div>
               </div>
-              <Label htmlFor="rt-login-input">RT 列表</Label>
-              <Textarea
-                id="rt-login-input"
-                value={rtLogin.text}
-                placeholder="一行一条，可以是邮箱----密码----x----rt_xxx，也可以只有 rt_xxx"
-                className={cn("min-h-44 font-mono text-xs", rtLogin.error && "border-rose-300 focus-visible:border-rose-400 focus-visible:ring-rose-200")}
-                onChange={(event) =>
-                  setRtLogin((current) =>
-                    current ? { ...current, text: event.target.value, error: null } : current,
-                  )
-                }
-              />
+              <div className="grid w-full gap-2">
+                <Label htmlFor="rt-login-input">RT 列表</Label>
+                <Textarea
+                  id="rt-login-input"
+                  value={rtLogin.text}
+                  placeholder="一行一条，可以是邮箱----密码----x----rt_xxx，也可以只有 rt_xxx"
+                  className={cn("min-h-44 w-full resize-y font-mono text-xs focus-visible:ring-1", rtLogin.error && "border-rose-300 focus-visible:border-rose-400 focus-visible:ring-rose-200")}
+                  onChange={(event) =>
+                    setRtLogin((current) =>
+                      current ? { ...current, text: event.target.value, error: null } : current,
+                    )
+                  }
+                />
+              </div>
             </div>
           ) : null}
           {rtLogin && rtLogin.stage !== "input" ? (
@@ -3185,10 +3220,6 @@ function parseRtLoginInput(text: string) {
     });
 
   return { valid, invalid };
-}
-
-function rtLoginModeLabel(mode: RtLoginMode) {
-  return mode === "mobile_rt" ? "Mobile RT登录" : "RT登录";
 }
 
 function rtLoginProxyLabel(proxy: ProxyRow) {
