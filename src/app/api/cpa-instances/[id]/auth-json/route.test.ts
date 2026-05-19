@@ -250,6 +250,93 @@ describe("/api/cpa-instances/[id]/auth-json", () => {
     expect(jobs.syncCpaInstanceById).toHaveBeenCalledTimes(1);
     expect(jobs.syncCpaInstanceById).toHaveBeenCalledWith(cpaInstanceId);
   });
+
+  it("converts ChatGPT session JSON to CPA auth JSON before uploading", async () => {
+    const sqlite = await setupSqlite();
+    const cpaInstanceId = insertInstance(sqlite);
+    const cpaClient = await import("@/lib/cpa-client");
+    const jobs = await import("@/lib/jobs");
+    vi.mocked(cpaClient.uploadRemoteAuthFile).mockResolvedValue(undefined);
+    vi.mocked(jobs.syncCpaInstanceById).mockResolvedValue({
+      instance: "target",
+      status: "success",
+      message: "synced",
+    });
+    const route = await import("./route");
+
+    const response = await route.POST(
+      new Request("http://localhost/api/cpa-instances/1/auth-json", {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({
+          source: "session-json",
+          files: [
+            {
+              fileName: "session.json",
+              payload: {
+                user: {
+                  id: "user-test",
+                  email: "session@example.com",
+                },
+                expires: "2026-08-06T14:29:36.155Z",
+                account: {
+                  id: "00000000-0000-4000-9000-000000000000",
+                  planType: "plus",
+                },
+                accessToken: "access-token",
+                sessionToken: "session-token",
+              },
+            },
+          ],
+        }),
+      }),
+      { params: Promise.resolve({ id: String(cpaInstanceId) }) },
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      uploaded: 1,
+      failed: 0,
+      results: [
+        {
+          fileName: "codex-session@example.com-auto.json",
+          email: "session@example.com",
+          status: "success",
+        },
+      ],
+    });
+    expect(cpaClient.uploadRemoteAuthFile).toHaveBeenCalledTimes(1);
+    const [, fileName, payload] = vi.mocked(cpaClient.uploadRemoteAuthFile).mock.calls[0] ?? [];
+    expect(fileName).toBe("codex-session@example.com-auto.json");
+    expect(payload).toMatchObject({
+      type: "codex",
+      account_id: "00000000-0000-4000-9000-000000000000",
+      chatgpt_account_id: "00000000-0000-4000-9000-000000000000",
+      email: "session@example.com",
+      name: "session@example.com",
+      plan_type: "plus",
+      chatgpt_plan_type: "plus",
+      access_token: "access-token",
+      refresh_token: "",
+      session_token: "session-token",
+      expired: "2026-08-06T14:29:36.155Z",
+      id_token_synthetic: true,
+    });
+    expect((payload as Record<string, unknown>).id_token).toEqual(expect.stringMatching(/^[^.]+\.[^.]+\.synthetic$/));
+    expect(
+      sqlite
+        .prepare("SELECT file_name, email, provider FROM auth_files ORDER BY file_name")
+        .all(),
+    ).toEqual([
+      {
+        file_name: "codex-session@example.com-auto.json",
+        email: "session@example.com",
+        provider: "codex",
+      },
+    ]);
+    expect(jobs.syncCpaInstanceById).toHaveBeenCalledTimes(1);
+    expect(jobs.syncCpaInstanceById).toHaveBeenCalledWith(cpaInstanceId);
+  });
 });
 
 async function setupSqlite() {

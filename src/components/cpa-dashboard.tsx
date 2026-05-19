@@ -223,7 +223,7 @@ type RtLoginUploadResult = {
 
 type CpaJsonUploadFile = {
   fileName: string;
-  payload: Record<string, unknown>;
+  payload: unknown;
 };
 
 type CpaJsonUploadResult = {
@@ -236,6 +236,8 @@ type CpaJsonUploadResult = {
     error?: string;
   }>;
 };
+
+type CpaJsonUploadSource = "session-json";
 
 const navItems = [
   { id: "auth", label: "账号管理", icon: FileKey2, href: "/auth" },
@@ -799,6 +801,7 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
   async function uploadCpaJsonFiles(
     cpaInstanceId: number,
     files: CpaJsonUploadFile[],
+    source?: CpaJsonUploadSource,
   ) {
     let result: CpaJsonUploadResult | null = null;
     await withUpdatingCpaTables([cpaInstanceId], async () => {
@@ -806,7 +809,7 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
         `/api/cpa-instances/${cpaInstanceId}/auth-json`,
         {
           method: "POST",
-          body: JSON.stringify({ files }),
+          body: JSON.stringify({ files, source }),
         },
       );
       await loadAll();
@@ -1268,6 +1271,13 @@ type RtLoginDialogState = {
   rows: RtLoginUiRow[];
 };
 
+type SessionJsonDialogState = {
+  instance: CpaInstance;
+  text: string;
+  stage: "input" | "uploading";
+  error: string | null;
+};
+
 function AuthFilesSection({
   groups,
   quotaGroups,
@@ -1312,6 +1322,7 @@ function AuthFilesSection({
   onUploadCpaJsonFiles: (
     cpaInstanceId: number,
     files: CpaJsonUploadFile[],
+    source?: CpaJsonUploadSource,
   ) => Promise<CpaJsonUploadResult | null>;
   onBatchHandleExceptionAuthFiles: (
     cpaInstanceId: number,
@@ -1343,6 +1354,7 @@ function AuthFilesSection({
   const [proxyTargetUrl, setProxyTargetUrl] = useState("");
   const [openLoginMenuInstanceId, setOpenLoginMenuInstanceId] = useState<number | null>(null);
   const [rtLogin, setRtLogin] = useState<RtLoginDialogState | null>(null);
+  const [sessionJson, setSessionJson] = useState<SessionJsonDialogState | null>(null);
   const [oauthLogin, setOauthLogin] = useState<{
     instance: CpaInstance;
     authUrl: string | null;
@@ -1457,6 +1469,16 @@ function AuthFilesSection({
     cpaJsonInputRef.current?.click();
   }
 
+  function openSessionJsonDialog(instance: CpaInstance) {
+    setOpenLoginMenuInstanceId(null);
+    setSessionJson({
+      instance,
+      text: "",
+      stage: "input",
+      error: null,
+    });
+  }
+
   async function handleCpaJsonInputChange(event: ChangeEvent<HTMLInputElement>) {
     const input = event.currentTarget;
     const files = Array.from(input.files ?? []);
@@ -1513,6 +1535,62 @@ function AuthFilesSection({
       }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function submitSessionJson() {
+    if (!sessionJson) {
+      return;
+    }
+
+    const text = sessionJson.text.trim();
+    if (!text) {
+      const message = "请先粘贴 Session JSON";
+      setSessionJson((current) => current ? { ...current, error: message } : current);
+      toast.error(message);
+      return;
+    }
+
+    let payload: unknown;
+    try {
+      payload = JSON.parse(text) as unknown;
+    } catch {
+      const message = "Session JSON 解析失败，请确认内容是合法 JSON";
+      setSessionJson((current) => current ? { ...current, error: message } : current);
+      toast.error(message);
+      return;
+    }
+
+    if (!isJsonObject(payload) && !Array.isArray(payload)) {
+      const message = "Session JSON 必须是 JSON 对象或数组";
+      setSessionJson((current) => current ? { ...current, error: message } : current);
+      toast.error(message);
+      return;
+    }
+
+    setSessionJson((current) => current ? { ...current, stage: "uploading", error: null } : current);
+    try {
+      const result = await onUploadCpaJsonFiles(
+        sessionJson.instance.id,
+        [{ fileName: "session-json.json", payload }],
+        "session-json",
+      );
+      const uploaded = result?.uploaded ?? 0;
+      const failed = result?.failed ?? 0;
+      if (uploaded === 0 && failed > 0) {
+        const firstError = result?.results.find((item) => item.status === "error")?.error;
+        throw new Error(firstError ?? "Session JSON 转换失败");
+      }
+      if (failed > 0) {
+        toast.warning(`已添加 ${uploaded} 个 Session 账号，${failed} 个失败`);
+      } else {
+        toast.success(`已添加 ${uploaded} 个 Session 账号`);
+      }
+      setSessionJson(null);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setSessionJson((current) => current ? { ...current, stage: "input", error: message } : current);
+      toast.error(message);
     }
   }
 
@@ -1896,6 +1974,14 @@ function AuthFilesSection({
                         >
                           <FileKey2 className="h-3 w-3" />
                           JSON 文件
+                        </button>
+                        <button
+                          type="button"
+                          className="flex w-full items-center gap-1.5 rounded px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground"
+                          onClick={() => openSessionJsonDialog(group.instance)}
+                        >
+                          <FileKey2 className="h-3 w-3" />
+                          Session JSON
                         </button>
                         <Separator className="my-1" />
                         <button
@@ -2418,6 +2504,70 @@ function AuthFilesSection({
                 <Loader2 className="h-4 w-4 animate-spin" />
               ) : null}
               {rtLoginConfirmLabel(rtLogin)}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={sessionJson !== null}
+        onOpenChange={(open) => {
+          if (!open && sessionJson?.stage !== "uploading") {
+            setSessionJson(null);
+          }
+        }}
+      >
+        <DialogContent className="sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Session JSON</DialogTitle>
+            <DialogDescription>
+              粘贴 GPTSession2CPAandSub2API 使用的 ChatGPT Session JSON，转换后添加到 {sessionJson?.instance.name ?? "当前 CPA"}。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-2">
+            <Label htmlFor="session-json-input">Session JSON</Label>
+            <Textarea
+              id="session-json-input"
+              value={sessionJson?.text ?? ""}
+              disabled={sessionJson?.stage === "uploading"}
+              placeholder='{"user":{"email":"mark@example.com"},"expires":"2026-08-06T14:29:36.155Z","account":{"id":"...","planType":"plus"},"accessToken":"...","sessionToken":"..."}'
+              className={cn(
+                "max-h-[45vh] min-h-56 resize-y overflow-auto font-mono text-xs",
+                sessionJson?.error && "border-rose-300 focus-visible:border-rose-400 focus-visible:ring-rose-200",
+              )}
+              onChange={(event) =>
+                setSessionJson((current) =>
+                  current ? { ...current, text: event.target.value, error: null } : current,
+                )
+              }
+            />
+            <div className="text-xs text-muted-foreground">
+              支持单个 Session JSON，也支持包含多个 session 对象的数组或嵌套 JSON。
+            </div>
+            {sessionJson?.error ? (
+              <div className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+                {sessionJson.error}
+              </div>
+            ) : null}
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={sessionJson?.stage === "uploading"}
+              onClick={() => setSessionJson(null)}
+            >
+              取消
+            </Button>
+            <Button
+              type="button"
+              disabled={!sessionJson || sessionJson.stage === "uploading"}
+              onClick={() => void submitSessionJson()}
+            >
+              {sessionJson?.stage === "uploading" ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : null}
+              确定
             </Button>
           </DialogFooter>
         </DialogContent>

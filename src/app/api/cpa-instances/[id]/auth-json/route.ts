@@ -26,6 +26,7 @@ type AuthJsonUploadFile = {
 
 type AuthJsonUploadBody = {
   files?: unknown;
+  source?: unknown;
 };
 
 type NormalizedAuthJsonFile = {
@@ -84,9 +85,10 @@ export async function POST(
       return badRequest("files is required");
     }
 
+    const source = stringOrNull(body.source);
     const results: AuthJsonUploadResult[] = [];
     for (const file of files) {
-      const expandedFiles = expandAuthJsonFile(file);
+      const expandedFiles = expandAuthJsonFile(file, { source });
       for (const expanded of expandedFiles) {
         if (expanded.kind === "error") {
           results.push(expanded.result);
@@ -126,7 +128,10 @@ export async function POST(
   }
 }
 
-function expandAuthJsonFile(value: unknown): ExpandedAuthJsonFile[] {
+function expandAuthJsonFile(
+  value: unknown,
+  options: { source?: string | null } = {},
+): ExpandedAuthJsonFile[] {
   if (!isRecord(value)) {
     return [invalidFileResult(null, "invalid JSON upload item")];
   }
@@ -134,7 +139,21 @@ function expandAuthJsonFile(value: unknown): ExpandedAuthJsonFile[] {
   const file = value as AuthJsonUploadFile;
   const fileName = stringOrNull(file.fileName);
   const payload = file.payload;
-  if (!fileName || !isRecord(payload)) {
+  if (!fileName) {
+    return [invalidFileResult(fileName, "invalid CPA JSON file")];
+  }
+
+  if (options.source === "session-json") {
+    const converted = collectSessionLikeObjects(payload)
+      .map((item, index) => convertSessionJsonToCpaAuthFile(item.value, item.path, index + 1))
+      .filter((item): item is NormalizedAuthJsonFile => item !== null);
+    if (converted.length > 0) {
+      return converted.map((item) => ({ kind: "file", file: item }));
+    }
+    return [invalidFileResult(fileName, "未找到包含 accessToken 和账号信息的 Session JSON")];
+  }
+
+  if (!isRecord(payload)) {
     return [invalidFileResult(fileName, "invalid CPA JSON file")];
   }
 
@@ -161,6 +180,191 @@ function expandAuthJsonFile(value: unknown): ExpandedAuthJsonFile[] {
       },
     },
   ];
+}
+
+function collectSessionLikeObjects(
+  value: unknown,
+): Array<{ value: Record<string, unknown>; path: string }> {
+  const found: Array<{ value: Record<string, unknown>; path: string }> = [];
+  const visited = new WeakSet<object>();
+
+  function visit(item: unknown, path: string) {
+    if (!isRecord(item) && !Array.isArray(item)) {
+      return;
+    }
+
+    if (isRecord(item)) {
+      if (visited.has(item)) {
+        return;
+      }
+      visited.add(item);
+
+      const token = firstNonEmpty(
+        item.accessToken,
+        item.access_token,
+        recordValue(item.token, "accessToken"),
+        recordValue(item.token, "access_token"),
+        recordValue(item.credentials, "accessToken"),
+        recordValue(item.credentials, "access_token"),
+      );
+      const hasIdentity =
+        isRecord(item.user) ||
+        Boolean(firstNonEmpty(
+          item.email,
+          item.name,
+          recordValue(item.providerSpecificData, "chatgptAccountId"),
+          recordValue(item.providerSpecificData, "chatgpt_account_id"),
+          item.id,
+        ));
+      if (token && hasIdentity) {
+        found.push({ value: item, path });
+        return;
+      }
+
+      for (const [key, child] of Object.entries(item)) {
+        if (key === "accessToken" || key === "access_token" || key === "sessionToken") {
+          continue;
+        }
+        visit(child, `${path}.${key}`);
+      }
+      return;
+    }
+
+    item.forEach((child, index) => visit(child, `${path}[${index}]`));
+  }
+
+  visit(value, "$");
+  return found;
+}
+
+function convertSessionJsonToCpaAuthFile(
+  record: Record<string, unknown>,
+  path: string,
+  index: number,
+): NormalizedAuthJsonFile | null {
+  const accessToken = firstNonEmpty(
+    record.accessToken,
+    record.access_token,
+    recordValue(record.token, "accessToken"),
+    recordValue(record.token, "access_token"),
+    recordValue(record.credentials, "accessToken"),
+    recordValue(record.credentials, "access_token"),
+  );
+  if (!accessToken) {
+    return null;
+  }
+
+  const sessionToken = firstNonEmpty(
+    record.sessionToken,
+    record.session_token,
+    recordValue(record.token, "sessionToken"),
+    recordValue(record.token, "session_token"),
+    recordValue(record.credentials, "session_token"),
+  );
+  const refreshToken = firstNonEmpty(
+    record.refreshToken,
+    record.refresh_token,
+    recordValue(record.token, "refreshToken"),
+    recordValue(record.token, "refresh_token"),
+    recordValue(record.credentials, "refresh_token"),
+  );
+  const inputIdToken = firstNonEmpty(
+    record.idToken,
+    record.id_token,
+    recordValue(record.token, "idToken"),
+    recordValue(record.token, "id_token"),
+    recordValue(record.credentials, "id_token"),
+  );
+
+  const accessPayload = parseJwtPayload(accessToken);
+  const idPayload = parseJwtPayload(inputIdToken);
+  const auth = openAiAuthSection(accessPayload);
+  const idAuth = openAiAuthSection(idPayload);
+  const profile = openAiProfileSection(accessPayload);
+  const user = recordObject(record.user);
+  const account = recordObject(record.account);
+  const credentials = recordObject(record.credentials);
+  const providerSpecificData = recordObject(record.providerSpecificData);
+  const expiresAt = firstNonEmpty(
+    accessPayload ? timestampFromUnixSeconds(accessPayload.exp) : undefined,
+    normalizeTimestamp(record.expires),
+    normalizeTimestamp(record.expiresAt),
+    normalizeTimestamp(record.expired),
+    normalizeTimestamp(record.expires_at),
+  );
+  const email = firstNonEmpty(
+    user.email,
+    record.email,
+    credentials.email,
+    providerSpecificData.email,
+    profile.email,
+    idPayload?.email,
+    accessPayload?.email,
+  );
+  const accountId = firstNonEmpty(
+    account.id,
+    record.account_id,
+    record.chatgptAccountId,
+    providerSpecificData.chatgptAccountId,
+    providerSpecificData.chatgpt_account_id,
+    credentials.chatgpt_account_id,
+    auth.chatgpt_account_id,
+    idAuth.chatgpt_account_id,
+    record.provider === "codex" ? record.id : undefined,
+  );
+  const userId = firstNonEmpty(
+    user.id,
+    record.user_id,
+    record.chatgptUserId,
+    providerSpecificData.chatgptUserId,
+    providerSpecificData.chatgpt_user_id,
+    auth.chatgpt_user_id,
+    auth.user_id,
+    idAuth.chatgpt_user_id,
+    idAuth.user_id,
+  );
+  const planType = firstNonEmpty(
+    account.planType,
+    account.plan_type,
+    record.planType,
+    record.plan_type,
+    providerSpecificData.chatgptPlanType,
+    providerSpecificData.chatgpt_plan_type,
+    credentials.plan_type,
+    auth.chatgpt_plan_type,
+    idAuth.chatgpt_plan_type,
+  );
+  const name = firstNonEmpty(email, stringOrNull(record.name), path, `Session ${index}`) ?? `Session ${index}`;
+  const syntheticIdToken = !inputIdToken
+    ? buildSyntheticCodexIdToken(email, accountId, planType, userId, expiresAt)
+    : null;
+  const idToken = firstNonEmpty(inputIdToken, syntheticIdToken);
+  const exportedAt = nowIso();
+  const payload = stripUndefined({
+    type: "codex",
+    account_id: accountId,
+    chatgpt_account_id: accountId,
+    email,
+    name,
+    plan_type: planType,
+    chatgpt_plan_type: planType,
+    id_token: idToken,
+    id_token_synthetic: syntheticIdToken ? true : undefined,
+    access_token: accessToken,
+    refresh_token: refreshToken ?? "",
+    session_token: sessionToken,
+    last_refresh: exportedAt,
+    expired: expiresAt,
+    disabled: Boolean(record.disabled) || undefined,
+  });
+
+  return {
+    fileName: buildAutoAuthFileName(email ?? `session-${index}`),
+    payload,
+    email: email ?? null,
+    provider: "codex",
+    proxyUrl: null,
+  };
 }
 
 function invalidFileResult(fileName: string | null, error: string): ExpandedAuthJsonFile {
@@ -305,6 +509,142 @@ function setIfString(target: Record<string, unknown>, key: string, value: unknow
   if (normalized) {
     target[key] = normalized;
   }
+}
+
+function firstNonEmpty(...values: unknown[]) {
+  for (const value of values) {
+    const normalized = stringOrNull(value);
+    if (normalized) {
+      return normalized;
+    }
+  }
+  return undefined;
+}
+
+function recordValue(value: unknown, key: string) {
+  return isRecord(value) ? value[key] : undefined;
+}
+
+function recordObject(value: unknown): Record<string, unknown> {
+  return isRecord(value) ? value : {};
+}
+
+function parseJwtPayload(token: string | undefined) {
+  if (!token) {
+    return undefined;
+  }
+
+  const segments = token.split(".");
+  if (segments.length < 2) {
+    return undefined;
+  }
+
+  try {
+    const decoded = Buffer.from(segments[1], "base64url").toString("utf8");
+    const parsed = JSON.parse(decoded) as unknown;
+    return isRecord(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function openAiAuthSection(payload: Record<string, unknown> | undefined) {
+  const auth = payload?.["https://api.openai.com/auth"];
+  return isRecord(auth) ? auth : {};
+}
+
+function openAiProfileSection(payload: Record<string, unknown> | undefined) {
+  const profile = payload?.["https://api.openai.com/profile"];
+  return isRecord(profile) ? profile : {};
+}
+
+function normalizeTimestamp(value: unknown) {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return value.toISOString();
+  }
+
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const milliseconds = value > 1e11 ? value : value * 1000;
+    const date = new Date(milliseconds);
+    return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
+  }
+
+  const normalized = stringOrNull(value);
+  if (!normalized) {
+    return undefined;
+  }
+
+  const date = new Date(normalized);
+  return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
+}
+
+function timestampFromUnixSeconds(value: unknown) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return undefined;
+  }
+
+  const date = new Date(numeric * 1000);
+  return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
+}
+
+function buildSyntheticCodexIdToken(
+  email: string | undefined,
+  accountId: string | undefined,
+  planType: string | undefined,
+  userId: string | undefined,
+  expiresAt: string | undefined,
+) {
+  if (!accountId) {
+    return undefined;
+  }
+
+  const now = Math.trunc(Date.now() / 1000);
+  const authInfo: Record<string, unknown> = { chatgpt_account_id: accountId };
+  const expires = epochSecondsFromValue(expiresAt) || now + 90 * 24 * 60 * 60;
+
+  if (planType) {
+    authInfo.chatgpt_plan_type = planType;
+  }
+  if (userId) {
+    authInfo.chatgpt_user_id = userId;
+    authInfo.user_id = userId;
+  }
+
+  const payload: Record<string, unknown> = {
+    iat: now,
+    exp: expires,
+    "https://api.openai.com/auth": authInfo,
+  };
+  if (email) {
+    payload.email = email;
+  }
+
+  return `${encodeBase64UrlJson({ alg: "none", typ: "JWT", cpa_synthetic: true })}.${encodeBase64UrlJson(payload)}.synthetic`;
+}
+
+function encodeBase64UrlJson(value: Record<string, unknown>) {
+  return Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
+}
+
+function epochSecondsFromValue(value: unknown) {
+  if (value === undefined || value === null || value === "") {
+    return 0;
+  }
+
+  const numeric = Number(value);
+  if (Number.isFinite(numeric)) {
+    return Math.trunc(numeric > 1e11 ? numeric / 1000 : numeric);
+  }
+
+  const parsed = Date.parse(String(value));
+  return Number.isFinite(parsed) ? Math.trunc(parsed / 1000) : 0;
+}
+
+function stripUndefined(value: Record<string, unknown>) {
+  return Object.fromEntries(
+    Object.entries(value).filter(([, item]) => item !== undefined && item !== null),
+  );
 }
 
 function emailFromText(value: string | null) {
