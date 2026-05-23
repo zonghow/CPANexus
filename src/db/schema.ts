@@ -43,6 +43,7 @@ export const authFiles = sqliteTable(
     proxyUrl: text("proxy_url"),
     size: integer("size"),
     rawJson: text("raw_json"),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
     lastSyncedAt: text("last_synced_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   },
   (table) => [

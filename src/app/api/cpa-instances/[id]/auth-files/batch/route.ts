@@ -15,18 +15,21 @@ import {
 } from "@/lib/api";
 import {
   deleteRemoteAuthFile,
+  downloadRemoteAuthFile,
   patchRemoteAuthFileFields,
   setRemoteAuthFileDisabled,
+  uploadRemoteAuthFile,
 } from "@/lib/cpa-client";
 import {
   syncCpaInstanceById,
   type CpaInstanceSyncResult,
 } from "@/lib/jobs";
 import { extractSubscriptionType, isFreeSubscriptionType } from "@/lib/subscription";
+import { buildZipArchive } from "@/lib/zip";
 
 export const runtime = "nodejs";
 
-type BatchAction = "delete" | "disable" | "autoAssignProxy";
+type BatchAction = "delete" | "disable" | "autoAssignProxy" | "download" | "move";
 type BatchTarget = "selected" | "free";
 
 export async function POST(
@@ -45,9 +48,20 @@ export async function POST(
       return badRequest("CPA instance id is required");
     }
 
-    const body = await readJson<{ action?: BatchAction; authFileIds?: number[]; target?: BatchTarget }>(request);
-    if (body.action !== "delete" && body.action !== "disable" && body.action !== "autoAssignProxy") {
-      return badRequest("action must be delete, disable, or autoAssignProxy");
+    const body = await readJson<{
+      action?: BatchAction;
+      authFileIds?: number[];
+      target?: BatchTarget;
+      targetCpaInstanceId?: number;
+    }>(request);
+    if (
+      body.action !== "delete" &&
+      body.action !== "disable" &&
+      body.action !== "autoAssignProxy" &&
+      body.action !== "download" &&
+      body.action !== "move"
+    ) {
+      return badRequest("action must be delete, disable, autoAssignProxy, download, or move");
     }
     if (body.target !== undefined && body.target !== "selected" && body.target !== "free") {
       return badRequest("target must be selected or free");
@@ -69,6 +83,58 @@ export async function POST(
         processed: result.processed,
         skipped: result.skipped,
         sync: await syncAffectedCpaInstance(cpaInstanceId),
+      });
+    }
+
+    if (body.action === "download") {
+      const rows = loadSelectedAuthFiles(cpaInstanceId, body.authFileIds);
+      if (rows instanceof Response) {
+        return rows;
+      }
+
+      const archive = await downloadAuthFilesAsZip(instance, rows);
+      for (const authFile of rows) {
+        await deleteRemoteAuthFile(instance, authFile.fileName);
+        deleteLocalAuthFile(cpaInstanceId, authFile.id, authFile.fileName);
+      }
+      await syncAffectedCpaInstance(cpaInstanceId);
+
+      return new Response(archive, {
+        headers: {
+          "content-type": "application/zip",
+          "content-disposition": `attachment; filename="${downloadZipFileName()}"`,
+        },
+      });
+    }
+
+    if (body.action === "move") {
+      const rows = loadSelectedAuthFiles(cpaInstanceId, body.authFileIds);
+      if (rows instanceof Response) {
+        return rows;
+      }
+
+      const targetInstance = loadTargetCpaInstance(cpaInstanceId, body.targetCpaInstanceId);
+      if (targetInstance instanceof Response) {
+        return targetInstance;
+      }
+
+      const duplicateFileName = firstDuplicateTargetFileName(targetInstance.id, rows);
+      if (duplicateFileName) {
+        return badRequest(`target CPA already has auth file ${duplicateFileName}`);
+      }
+
+      const movedAt = new Date().toISOString();
+      for (const authFile of rows) {
+        const payload = await loadAuthPayload(instance, authFile.fileName, authFile.rawJson);
+        await uploadRemoteAuthFile(targetInstance, authFile.fileName, payload);
+        await deleteRemoteAuthFile(instance, authFile.fileName);
+        moveLocalAuthFile(targetInstance.id, authFile.id, authFile.cpaInstanceId, authFile.fileName, movedAt);
+      }
+
+      return okWithOptionalSync({
+        action: body.action,
+        processed: rows.length,
+        sync: await syncAffectedCpaInstances([cpaInstanceId, targetInstance.id]),
       });
     }
 
@@ -184,6 +250,118 @@ function deleteLocalAuthFile(cpaInstanceId: number, authFileId: number, fileName
     )
     .run();
   db.delete(authFiles).where(eq(authFiles.id, authFileId)).run();
+}
+
+async function downloadAuthFilesAsZip(
+  instance: typeof cpaInstances.$inferSelect,
+  rows: Array<typeof authFiles.$inferSelect>,
+) {
+  const entries = [];
+  for (const authFile of rows) {
+    const payload = await loadAuthPayload(instance, authFile.fileName, authFile.rawJson);
+    entries.push({
+      name: authFile.fileName,
+      data: stringifyAuthPayload(payload),
+    });
+  }
+
+  return buildZipArchive(entries);
+}
+
+async function loadAuthPayload(
+  sourceInstance: Parameters<typeof downloadRemoteAuthFile>[0],
+  fileName: string,
+  rawJson: string | null,
+) {
+  try {
+    return await downloadRemoteAuthFile(sourceInstance, fileName);
+  } catch {
+    if (!rawJson) {
+      throw new Error("auth file payload is unavailable");
+    }
+    return JSON.parse(rawJson) as unknown;
+  }
+}
+
+function stringifyAuthPayload(payload: unknown) {
+  const text = JSON.stringify(payload, null, 2);
+  if (!text) {
+    throw new Error("auth file payload is unavailable");
+  }
+  return `${text}\n`;
+}
+
+function loadTargetCpaInstance(sourceCpaInstanceId: number, targetCpaInstanceId: number | undefined) {
+  if (!targetCpaInstanceId || targetCpaInstanceId === sourceCpaInstanceId) {
+    return badRequest("target CPA instance is required");
+  }
+
+  const targetInstance = db
+    .select()
+    .from(cpaInstances)
+    .where(eq(cpaInstances.id, targetCpaInstanceId))
+    .get();
+  if (!targetInstance) {
+    return notFound("target CPA instance not found");
+  }
+  if (!targetInstance.enabled) {
+    return badRequest("target CPA instance is disabled");
+  }
+
+  return targetInstance;
+}
+
+function firstDuplicateTargetFileName(
+  targetCpaInstanceId: number,
+  rows: Array<typeof authFiles.$inferSelect>,
+) {
+  const targetFileNames = new Set(
+    db
+      .select({ fileName: authFiles.fileName })
+      .from(authFiles)
+      .where(eq(authFiles.cpaInstanceId, targetCpaInstanceId))
+      .all()
+      .map((row) => row.fileName),
+  );
+
+  return rows.find((row) => targetFileNames.has(row.fileName))?.fileName ?? null;
+}
+
+function moveLocalAuthFile(
+  targetCpaInstanceId: number,
+  authFileId: number,
+  sourceCpaInstanceId: number,
+  fileName: string,
+  movedAt: string,
+) {
+  db.delete(quotaSnapshots)
+    .where(
+      and(
+        eq(quotaSnapshots.cpaInstanceId, sourceCpaInstanceId),
+        eq(quotaSnapshots.authFileName, fileName),
+      ),
+    )
+    .run();
+  db.update(authFiles)
+    .set({
+      cpaInstanceId: targetCpaInstanceId,
+      status: "待配额刷新",
+      statusMessage: "已移动，等待目标 CPA 配额刷新",
+      available: false,
+      lastSyncedAt: movedAt,
+    })
+    .where(eq(authFiles.id, authFileId))
+    .run();
+}
+
+function downloadZipFileName(date = new Date()) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const hour = String(date.getHours()).padStart(2, "0");
+  const minute = String(date.getMinutes()).padStart(2, "0");
+  const second = String(date.getSeconds()).padStart(2, "0");
+  return `auths-${year}${month}${day}-${hour}${minute}${second}.zip`;
 }
 
 async function autoAssignProxy(instance: typeof cpaInstances.$inferSelect) {
@@ -315,6 +493,31 @@ async function syncAffectedCpaInstance(cpaInstanceId: number) {
       message: errorMessage(error),
     };
   }
+}
+
+async function syncAffectedCpaInstances(cpaInstanceIds: number[]) {
+  const results = [];
+  for (const cpaInstanceId of [...new Set(cpaInstanceIds)]) {
+    results.push(await syncAffectedCpaInstance(cpaInstanceId));
+  }
+
+  const failed = results.filter((result) => result.status === "error");
+  if (failed.length === 0) {
+    return {
+      instance: `${results.length} 个 CPA`,
+      status: "success" as const,
+      message: "synced",
+    };
+  }
+  if (failed.length === 1) {
+    return failed[0];
+  }
+
+  return {
+    instance: `${failed.length} 个 CPA`,
+    status: "error" as const,
+    message: failed.map((result) => `${result.instance}: ${result.message}`).join("; "),
+  };
 }
 
 function okWithOptionalSync(result: {

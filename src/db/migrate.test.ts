@@ -56,6 +56,100 @@ describe("migrate", () => {
     ).toEqual({ proxy_url: proxyUrl });
   });
 
+  it("backfills auth file created_at from last_synced_at for existing databases", async () => {
+    const { migrate } = await import("./migrate");
+    const { getSqlite } = await import("./client");
+
+    const sqlite = getSqlite();
+    sqlite.exec(`
+      CREATE TABLE cpa_instances (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        base_url TEXT NOT NULL,
+        password TEXT NOT NULL,
+        quota_refresh_path TEXT NOT NULL DEFAULT '/v0/management/auth-files',
+        enabled INTEGER NOT NULL DEFAULT 1,
+        last_synced_at TEXT,
+        last_sync_status TEXT,
+        last_sync_error TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE TABLE auth_files (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        cpa_instance_id INTEGER NOT NULL REFERENCES cpa_instances(id) ON DELETE CASCADE,
+        remote_id TEXT,
+        auth_index TEXT,
+        file_name TEXT NOT NULL,
+        email TEXT,
+        provider TEXT,
+        label TEXT,
+        status TEXT,
+        status_message TEXT,
+        disabled INTEGER NOT NULL DEFAULT 0,
+        available INTEGER NOT NULL DEFAULT 1,
+        proxy_url TEXT,
+        size INTEGER,
+        raw_json TEXT,
+        last_synced_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    const cpaInstanceId = sqlite
+      .prepare(`
+        INSERT INTO cpa_instances (name, base_url, password)
+        VALUES ('target', 'https://target.example.com', 'secret')
+      `)
+      .run().lastInsertRowid;
+    sqlite
+      .prepare(`
+        INSERT INTO auth_files (cpa_instance_id, file_name, email, last_synced_at)
+        VALUES (?, 'target.json', 'target@example.com', '2026-05-20T08:30:00.000Z')
+      `)
+      .run(cpaInstanceId);
+
+    migrate();
+
+    const columns = sqlite
+      .prepare("PRAGMA table_info(auth_files)")
+      .all() as Array<{ name: string }>;
+    expect(columns.map((column) => column.name)).toContain("created_at");
+    expect(
+      sqlite.prepare("SELECT created_at FROM auth_files WHERE file_name = 'target.json'").get(),
+    ).toEqual({ created_at: "2026-05-20T08:30:00.000Z" });
+  });
+
+  it("backfills auth file created_at from raw auth json when available", async () => {
+    const { migrate } = await import("./migrate");
+    const { getSqlite } = await import("./client");
+
+    migrate();
+    const sqlite = getSqlite();
+    const cpaInstanceId = sqlite
+      .prepare(`
+        INSERT INTO cpa_instances (name, base_url, password)
+        VALUES ('target', 'https://target.example.com', 'secret')
+      `)
+      .run().lastInsertRowid;
+    sqlite
+      .prepare(`
+        INSERT INTO auth_files (cpa_instance_id, file_name, email, raw_json, created_at, last_synced_at)
+        VALUES (?, 'target.json', 'target@example.com', ?, '2026-05-24T01:38:00.000Z', '2026-05-24T01:38:00.000Z')
+      `)
+      .run(
+        cpaInstanceId,
+        JSON.stringify({
+          email: "target@example.com",
+          added_at: "2026-05-20T08:30:00.000Z",
+        }),
+      );
+
+    migrate();
+
+    expect(
+      sqlite.prepare("SELECT created_at FROM auth_files WHERE file_name = 'target.json'").get(),
+    ).toEqual({ created_at: "2026-05-20T08:30:00.000Z" });
+  });
+
   it("creates dashboard metric snapshot storage", async () => {
     const { migrate } = await import("./migrate");
     const { getSqlite } = await import("./client");

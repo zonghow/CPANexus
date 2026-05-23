@@ -8,8 +8,10 @@ import { createSessionCookieHeader } from "@/lib/auth";
 
 vi.mock("@/lib/cpa-client", () => ({
   deleteRemoteAuthFile: vi.fn(),
+  downloadRemoteAuthFile: vi.fn(),
   patchRemoteAuthFileFields: vi.fn(),
   setRemoteAuthFileDisabled: vi.fn(),
+  uploadRemoteAuthFile: vi.fn(),
 }));
 
 vi.mock("@/lib/jobs", () => ({
@@ -371,6 +373,126 @@ describe("/api/cpa-instances/[id]/auth-files/batch", () => {
     );
     expect(rows.find((row) => row.id === skippedId)?.proxy_url).toBeNull();
   });
+
+  it("downloads selected auth files as a zip and removes them from the source CPA", async () => {
+    const sqlite = await setupSqlite();
+    const cpaInstanceId = insertInstance(sqlite);
+    const firstId = insertAuthFile(sqlite, cpaInstanceId, "codex-first@example.com-auto.json");
+    const secondId = insertAuthFile(sqlite, cpaInstanceId, "codex-second@example.com-auto.json");
+    insertQuotaSnapshot(sqlite, cpaInstanceId, "codex-first@example.com-auto.json");
+    insertQuotaSnapshot(sqlite, cpaInstanceId, "codex-second@example.com-auto.json");
+
+    const cpaClient = await import("@/lib/cpa-client");
+    const jobs = await import("@/lib/jobs");
+    vi.mocked(cpaClient.downloadRemoteAuthFile)
+      .mockResolvedValueOnce({ email: "first@example.com", token: "first-token" })
+      .mockResolvedValueOnce({ email: "second@example.com", token: "second-token" });
+    vi.mocked(cpaClient.deleteRemoteAuthFile).mockResolvedValue(undefined);
+    vi.mocked(jobs.syncCpaInstanceById).mockResolvedValue({
+      instance: "target",
+      status: "success",
+      message: "synced",
+    });
+    const route = await import("./route");
+
+    const response = await route.POST(
+      new Request("http://localhost/api/cpa-instances/1/auth-files/batch", {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ action: "download", authFileIds: [firstId, secondId] }),
+      }),
+      { params: Promise.resolve({ id: String(cpaInstanceId) }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("application/zip");
+    expect(response.headers.get("content-disposition")).toMatch(/^attachment; filename="auths-\d{8}-\d{6}\.zip"$/);
+    const archive = Buffer.from(await response.arrayBuffer());
+    expect(readZipEntryNames(archive)).toEqual([
+      "codex-first@example.com-auto.json",
+      "codex-second@example.com-auto.json",
+    ]);
+    expect(cpaClient.downloadRemoteAuthFile).toHaveBeenCalledTimes(2);
+    expect(cpaClient.deleteRemoteAuthFile).toHaveBeenCalledTimes(2);
+    expect(jobs.syncCpaInstanceById).toHaveBeenCalledWith(cpaInstanceId);
+    expect(sqlite.prepare("SELECT COUNT(*) AS count FROM auth_files").get()).toMatchObject({ count: 0 });
+    expect(sqlite.prepare("SELECT COUNT(*) AS count FROM quota_snapshots").get()).toMatchObject({ count: 0 });
+  });
+
+  it("moves selected auth files to another CPA without returning a zip", async () => {
+    const sqlite = await setupSqlite();
+    const sourceId = insertInstance(sqlite, "source", "https://source.example.com");
+    const targetId = insertInstance(sqlite, "target", "https://target.example.com");
+    const firstId = insertAuthFile(sqlite, sourceId, "codex-first@example.com-auto.json");
+    const secondId = insertAuthFile(sqlite, sourceId, "codex-second@example.com-auto.json");
+    insertQuotaSnapshot(sqlite, sourceId, "codex-first@example.com-auto.json");
+    insertQuotaSnapshot(sqlite, sourceId, "codex-second@example.com-auto.json");
+
+    const cpaClient = await import("@/lib/cpa-client");
+    const jobs = await import("@/lib/jobs");
+    vi.mocked(cpaClient.downloadRemoteAuthFile)
+      .mockResolvedValueOnce({ email: "first@example.com", token: "first-token" })
+      .mockResolvedValueOnce({ email: "second@example.com", token: "second-token" });
+    vi.mocked(cpaClient.uploadRemoteAuthFile).mockResolvedValue(undefined);
+    vi.mocked(cpaClient.deleteRemoteAuthFile).mockResolvedValue(undefined);
+    vi.mocked(jobs.syncCpaInstanceById).mockResolvedValue({
+      instance: "target",
+      status: "success",
+      message: "synced",
+    });
+    const route = await import("./route");
+
+    const response = await route.POST(
+      new Request(`http://localhost/api/cpa-instances/${sourceId}/auth-files/batch`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({
+          action: "move",
+          authFileIds: [firstId, secondId],
+          targetCpaInstanceId: targetId,
+        }),
+      }),
+      { params: Promise.resolve({ id: String(sourceId) }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("application/json");
+    await expect(response.json()).resolves.toMatchObject({
+      status: "ok",
+      processed: 2,
+      action: "move",
+    });
+    expect(cpaClient.uploadRemoteAuthFile).toHaveBeenCalledTimes(2);
+    expect(cpaClient.uploadRemoteAuthFile).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ id: targetId }),
+      "codex-first@example.com-auto.json",
+      { email: "first@example.com", token: "first-token" },
+    );
+    expect(cpaClient.deleteRemoteAuthFile).toHaveBeenCalledTimes(2);
+    expect(jobs.syncCpaInstanceById).toHaveBeenCalledTimes(2);
+    expect(jobs.syncCpaInstanceById).toHaveBeenNthCalledWith(1, sourceId);
+    expect(jobs.syncCpaInstanceById).toHaveBeenNthCalledWith(2, targetId);
+    expect(
+      sqlite.prepare("SELECT id, cpa_instance_id, available, status, status_message FROM auth_files ORDER BY id").all(),
+    ).toEqual([
+      {
+        id: firstId,
+        cpa_instance_id: targetId,
+        available: 0,
+        status: "待配额刷新",
+        status_message: "已移动，等待目标 CPA 配额刷新",
+      },
+      {
+        id: secondId,
+        cpa_instance_id: targetId,
+        available: 0,
+        status: "待配额刷新",
+        status_message: "已移动，等待目标 CPA 配额刷新",
+      },
+    ]);
+    expect(sqlite.prepare("SELECT COUNT(*) AS count FROM quota_snapshots").get()).toMatchObject({ count: 0 });
+  });
 });
 
 async function setupSqlite() {
@@ -380,14 +502,35 @@ async function setupSqlite() {
   return getSqlite();
 }
 
-function insertInstance(sqlite: Database.Database) {
+function insertInstance(
+  sqlite: Database.Database,
+  name = "target",
+  baseUrl = "https://target.example.com",
+) {
   const result = sqlite
     .prepare(`
       INSERT INTO cpa_instances (name, base_url, password, quota_refresh_path, enabled)
-      VALUES ('target', 'https://target.example.com', 'secret', '/v0/management/auth-files', 1)
+      VALUES (@name, @baseUrl, 'secret', '/v0/management/auth-files', 1)
     `)
-    .run();
+    .run({ name, baseUrl });
   return Number(result.lastInsertRowid);
+}
+
+function readZipEntryNames(archive: Buffer) {
+  const names: string[] = [];
+  let offset = 0;
+
+  while (archive.readUInt32LE(offset) === 0x04034b50) {
+    const compressedSize = archive.readUInt32LE(offset + 18);
+    const fileNameLength = archive.readUInt16LE(offset + 26);
+    const extraLength = archive.readUInt16LE(offset + 28);
+    const nameStart = offset + 30;
+    const dataStart = nameStart + fileNameLength + extraLength;
+    names.push(archive.subarray(nameStart, nameStart + fileNameLength).toString("utf8"));
+    offset = dataStart + compressedSize;
+  }
+
+  return names;
 }
 
 function insertAuthFile(

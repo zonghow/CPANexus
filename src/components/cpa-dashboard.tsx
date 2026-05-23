@@ -2,6 +2,7 @@
 
 import {
   Activity,
+  ArrowLeftRight,
   BarChart3,
   Bell,
   ChevronLeft,
@@ -71,6 +72,7 @@ import { resolveAccountQuotaStatus, type AccountQuotaState } from "@/lib/account
 import { sortAccountRows } from "@/lib/account-sort";
 import { onlyEnabledCpaGroups } from "@/lib/cpa-groups";
 import { cpaTableUpdatingIdsForJob, jobFinishedAtOrAfter } from "@/lib/cpa-sync-targets";
+import { getFloatingMenuPosition } from "@/lib/floating-menu";
 import {
   cronToSimpleSchedule,
   describeSimpleSchedule,
@@ -107,6 +109,7 @@ type AuthFile = {
   available: boolean;
   proxyUrl: string | null;
   rawJson: string | null;
+  createdAt: string;
   lastSyncedAt: string;
 };
 
@@ -186,6 +189,7 @@ type JobsApiResponse = {
 
 type BatchExceptionAction = "delete" | "disable";
 type BatchAuthFileTarget = "selected" | "free";
+type AuthExchangeMode = "download" | "move";
 
 type CronJobDraft = CronJob & {
   schedule: CronSimpleSchedule;
@@ -851,6 +855,60 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
     }
   }
 
+  async function downloadAuthFiles(cpaInstanceId: number, authFileIds: number[]) {
+    if (authFileIds.length === 0) {
+      throw new Error("请先选择账号");
+    }
+
+    await withUpdatingCpaTables([cpaInstanceId], async () => {
+      const response = await fetch(`/api/cpa-instances/${cpaInstanceId}/auth-files/batch`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ action: "download", authFileIds }),
+      });
+      if (!response.ok) {
+        throw new Error(await readFetchError(response));
+      }
+
+      const blob = await response.blob();
+      downloadBlob(
+        blob,
+        fileNameFromContentDisposition(response.headers.get("content-disposition")) ??
+          `auths-${formatDownloadTimestamp(new Date())}.zip`,
+      );
+      toast.success(`已取号 ${authFileIds.length} 个`);
+      await loadAll();
+    });
+  }
+
+  async function moveAuthFiles(
+    cpaInstanceId: number,
+    authFileIds: number[],
+    targetCpaInstanceId: number,
+  ) {
+    if (authFileIds.length === 0) {
+      throw new Error("请先选择账号");
+    }
+
+    await withUpdatingCpaTables([cpaInstanceId, targetCpaInstanceId], async () => {
+      const result = await mutate<{ processed: number; action: "move" }>(
+        `/api/cpa-instances/${cpaInstanceId}/auth-files/batch`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            action: "move",
+            authFileIds,
+            targetCpaInstanceId,
+          }),
+        },
+      );
+      toast.success(`已移动 ${result.processed} 个账号`);
+      await loadAll();
+    });
+  }
+
   async function autoAssignCpaProxies(cpaInstanceId: number) {
     try {
       await withUpdatingCpaTables([cpaInstanceId], async () => {
@@ -1016,6 +1074,8 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
                 onUploadRtLoginAccounts={uploadRtLoginCpaAccounts}
                 onUploadCpaJsonFiles={uploadCpaJsonFiles}
                 onBatchHandleExceptionAuthFiles={batchHandleExceptionAuthFiles}
+                onDownloadAuthFiles={downloadAuthFiles}
+                onMoveAuthFiles={moveAuthFiles}
                 onAutoAssignCpaProxies={autoAssignCpaProxies}
                 onRefreshCpa={refreshCpaInstance}
                 onStartCodexOAuth={startCodexOAuthLogin}
@@ -1293,6 +1353,8 @@ function AuthFilesSection({
   onUploadRtLoginAccounts,
   onUploadCpaJsonFiles,
   onBatchHandleExceptionAuthFiles,
+  onDownloadAuthFiles,
+  onMoveAuthFiles,
   onAutoAssignCpaProxies,
   onRefreshCpa,
   onStartCodexOAuth,
@@ -1332,6 +1394,12 @@ function AuthFilesSection({
     subject: string,
     target?: BatchAuthFileTarget,
   ) => Promise<void>;
+  onDownloadAuthFiles: (cpaInstanceId: number, authFileIds: number[]) => Promise<void>;
+  onMoveAuthFiles: (
+    cpaInstanceId: number,
+    authFileIds: number[],
+    targetCpaInstanceId: number,
+  ) => Promise<void>;
   onAutoAssignCpaProxies: (cpaInstanceId: number) => Promise<void>;
   onRefreshCpa: (cpaInstanceId: number) => Promise<void>;
   onStartCodexOAuth: (cpaInstanceId: number) => Promise<CodexOAuthStartResult>;
@@ -1365,6 +1433,16 @@ function AuthFilesSection({
     error: string | null;
   } | null>(null);
   const [openBulkMenuInstanceId, setOpenBulkMenuInstanceId] = useState<number | null>(null);
+  const [openExchangeMenuInstanceId, setOpenExchangeMenuInstanceId] = useState<number | null>(null);
+  const [exchangeMenuPosition, setExchangeMenuPosition] = useState({ left: 0, top: 0 });
+  const [exchangeDialog, setExchangeDialog] = useState<{
+    mode: AuthExchangeMode;
+    instance: CpaInstance;
+    rows: AuthFileQuotaRow[];
+    selectedIds: number[];
+    targetCpaInstanceId: string;
+    submitting: boolean;
+  } | null>(null);
   const [bulkExceptionTarget, setBulkExceptionTarget] = useState<{
     instance: CpaInstance;
     action: BatchExceptionAction;
@@ -1379,6 +1457,8 @@ function AuthFilesSection({
   const [useDesktopMasonry, setUseDesktopMasonry] = useState(false);
   const loginMenuRef = useRef<HTMLDivElement | null>(null);
   const bulkMenuRef = useRef<HTMLDivElement | null>(null);
+  const exchangeMenuRef = useRef<HTMLDivElement | null>(null);
+  const exchangeTriggerRef = useRef<HTMLButtonElement | null>(null);
   const cpaJsonInputRef = useRef<HTMLInputElement | null>(null);
   const cpaJsonUploadTargetRef = useRef<CpaInstance | null>(null);
 
@@ -1417,6 +1497,26 @@ function AuthFilesSection({
   }, [openBulkMenuInstanceId]);
 
   useEffect(() => {
+    if (openExchangeMenuInstanceId === null) {
+      return;
+    }
+
+    function closeOnOutsidePointerDown(event: PointerEvent) {
+      const target = event.target;
+      if (target instanceof Node && exchangeMenuRef.current?.contains(target)) {
+        return;
+      }
+      if (target instanceof Node && exchangeTriggerRef.current?.contains(target)) {
+        return;
+      }
+      setOpenExchangeMenuInstanceId(null);
+    }
+
+    document.addEventListener("pointerdown", closeOnOutsidePointerDown);
+    return () => document.removeEventListener("pointerdown", closeOnOutsidePointerDown);
+  }, [openExchangeMenuInstanceId]);
+
+  useEffect(() => {
     const mediaQuery = window.matchMedia("(min-width: 1280px)");
     const update = () => setUseDesktopMasonry(mediaQuery.matches);
     update();
@@ -1437,6 +1537,90 @@ function AuthFilesSection({
       : "";
     setProxyTarget(row);
     setProxyTargetUrl(currentProxyUrl);
+  }
+
+  function toggleExchangeMenu(
+    event: React.MouseEvent<HTMLButtonElement>,
+    instanceId: number,
+  ) {
+    if (openExchangeMenuInstanceId === instanceId) {
+      setOpenExchangeMenuInstanceId(null);
+      return;
+    }
+
+    const rect = event.currentTarget.getBoundingClientRect();
+    setExchangeMenuPosition(
+      getFloatingMenuPosition(rect, {
+        menuWidth: 112,
+        menuHeight: 76,
+        viewportWidth: window.innerWidth,
+        viewportHeight: window.innerHeight,
+      }),
+    );
+    setOpenLoginMenuInstanceId(null);
+    setOpenBulkMenuInstanceId(null);
+    setOpenExchangeMenuInstanceId(instanceId);
+  }
+
+  function openExchangeDialog(
+    mode: AuthExchangeMode,
+    instance: CpaInstance,
+    rows: AuthFileQuotaRow[],
+  ) {
+    const firstTarget = enabledInstances.find((target) => target.id !== instance.id);
+    setOpenExchangeMenuInstanceId(null);
+    setExchangeDialog({
+      mode,
+      instance,
+      rows,
+      selectedIds: [],
+      targetCpaInstanceId: firstTarget ? String(firstTarget.id) : "",
+      submitting: false,
+    });
+  }
+
+  function updateExchangeSelection(authFileId: number, selected: boolean) {
+    setExchangeDialog((current) => {
+      if (!current) {
+        return current;
+      }
+      const next = selected
+        ? [...new Set([...current.selectedIds, authFileId])]
+        : current.selectedIds.filter((id) => id !== authFileId);
+      return { ...current, selectedIds: next };
+    });
+  }
+
+  function setAllExchangeRowsSelected(selected: boolean) {
+    setExchangeDialog((current) =>
+      current
+        ? {
+            ...current,
+            selectedIds: selected ? current.rows.map((row) => row.id) : [],
+          }
+        : current,
+    );
+  }
+
+  async function submitExchangeDialog() {
+    if (!exchangeDialog || exchangeDialog.selectedIds.length === 0) {
+      return;
+    }
+
+    const selectedIds = exchangeDialog.selectedIds;
+    const targetCpaInstanceId = Number(exchangeDialog.targetCpaInstanceId);
+    setExchangeDialog((current) => current ? { ...current, submitting: true } : current);
+    try {
+      if (exchangeDialog.mode === "download") {
+        await onDownloadAuthFiles(exchangeDialog.instance.id, selectedIds);
+      } else {
+        await onMoveAuthFiles(exchangeDialog.instance.id, selectedIds, targetCpaInstanceId);
+      }
+      setExchangeDialog(null);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error));
+      setExchangeDialog((current) => current ? { ...current, submitting: false } : current);
+    }
   }
 
   function proxiesForCpa(cpaInstanceId: number) {
@@ -1872,6 +2056,15 @@ function AuthFilesSection({
     useDesktopMasonry && enabledGroups.length > 1
       ? distributeCpaGroups(enabledGroups)
       : [enabledGroups];
+  const exchangeMoveOptions = exchangeDialog
+    ? enabledInstances.filter((instance) => instance.id !== exchangeDialog.instance.id)
+    : [];
+  const exchangeSelectedCount = exchangeDialog?.selectedIds.length ?? 0;
+  const exchangeAllSelected = Boolean(
+    exchangeDialog &&
+      exchangeDialog.rows.length > 0 &&
+      exchangeDialog.selectedIds.length === exchangeDialog.rows.length,
+  );
 
   function renderGroupCard(group: { instance: CpaInstance; authFiles: AuthFile[] }) {
           const quotaGroup = quotaGroups.find((item) => item.instance.id === group.instance.id);
@@ -1896,7 +2089,8 @@ function AuthFilesSection({
           const isDragTarget = dragTargetCpaId === group.instance.id;
           const hasOpenHeaderMenu =
             openLoginMenuInstanceId === group.instance.id ||
-            openBulkMenuInstanceId === group.instance.id;
+            openBulkMenuInstanceId === group.instance.id ||
+            openExchangeMenuInstanceId === group.instance.id;
 
           return (
             <div
@@ -1935,17 +2129,19 @@ function AuthFilesSection({
                     <RefreshCw className={cn("h-3.5 w-3.5", isUpdating && "animate-spin")} />
                   </Button>
                   <div ref={openLoginMenuInstanceId === group.instance.id ? loginMenuRef : null} className="relative">
-                    <Button
-                      type="button"
-                      size="xs"
-                      variant="outline"
-                      aria-expanded={openLoginMenuInstanceId === group.instance.id}
-                      onClick={() =>
-                        setOpenLoginMenuInstanceId(
-                          openLoginMenuInstanceId === group.instance.id ? null : group.instance.id,
-                        )
-                      }
-                    >
+	                    <Button
+	                      type="button"
+	                      size="xs"
+	                      variant="outline"
+	                      aria-expanded={openLoginMenuInstanceId === group.instance.id}
+	                      onClick={() => {
+	                        setOpenBulkMenuInstanceId(null);
+	                        setOpenExchangeMenuInstanceId(null);
+	                        setOpenLoginMenuInstanceId(
+	                          openLoginMenuInstanceId === group.instance.id ? null : group.instance.id,
+	                        );
+	                      }}
+	                    >
                       <Plus className="h-3 w-3" />
                       补号
                     </Button>
@@ -1985,21 +2181,69 @@ function AuthFilesSection({
                           OAuth登录
                         </button>
                       </div>
-                    ) : null}
-                  </div>
-                  <div ref={openBulkMenuInstanceId === group.instance.id ? bulkMenuRef : null} className="relative">
-                    <Button
-                      type="button"
-                      size="icon-xs"
-                      variant="ghost"
-                      aria-label={`${group.instance.name} 批量操作`}
-                      aria-expanded={openBulkMenuInstanceId === group.instance.id}
-                      onClick={() =>
-                        setOpenBulkMenuInstanceId(
-                          openBulkMenuInstanceId === group.instance.id ? null : group.instance.id,
-                        )
-                      }
-                    >
+	                    ) : null}
+	                  </div>
+	                  <div className="relative">
+	                    <Button
+	                      ref={openExchangeMenuInstanceId === group.instance.id ? exchangeTriggerRef : null}
+	                      type="button"
+	                      size="xs"
+	                      variant="outline"
+	                      aria-label={`${group.instance.name} 交换`}
+	                      aria-expanded={openExchangeMenuInstanceId === group.instance.id}
+	                      aria-haspopup="menu"
+	                      disabled={rows.length === 0 || isUpdating}
+	                      title={rows.length === 0 ? "暂无账号" : undefined}
+	                      onClick={(event) => toggleExchangeMenu(event, group.instance.id)}
+	                    >
+	                      <ArrowLeftRight className="h-3 w-3" />
+	                      交换
+	                    </Button>
+	                    {openExchangeMenuInstanceId === group.instance.id && typeof document !== "undefined"
+	                      ? createPortal(
+	                          <div
+	                            ref={exchangeMenuRef}
+	                            role="menu"
+	                            className="fixed z-[120] min-w-28 rounded-md border bg-popover p-1 text-popover-foreground shadow-md"
+	                            style={{ left: exchangeMenuPosition.left, top: exchangeMenuPosition.top }}
+	                          >
+	                            <button
+	                              type="button"
+	                              role="menuitem"
+	                              className="flex w-full items-center rounded px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground"
+	                              onClick={() => openExchangeDialog("download", group.instance, rows)}
+	                            >
+	                              取号
+	                            </button>
+	                            <button
+	                              type="button"
+	                              role="menuitem"
+	                              disabled={enabledInstances.length <= 1}
+	                              className="flex w-full items-center rounded px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-50"
+	                              onClick={() => openExchangeDialog("move", group.instance, rows)}
+	                            >
+	                              移动
+	                            </button>
+	                          </div>,
+	                          document.body,
+	                        )
+	                      : null}
+	                  </div>
+	                  <div ref={openBulkMenuInstanceId === group.instance.id ? bulkMenuRef : null} className="relative">
+	                    <Button
+	                      type="button"
+	                      size="icon-xs"
+	                      variant="ghost"
+	                      aria-label={`${group.instance.name} 批量操作`}
+	                      aria-expanded={openBulkMenuInstanceId === group.instance.id}
+	                      onClick={() => {
+	                        setOpenLoginMenuInstanceId(null);
+	                        setOpenExchangeMenuInstanceId(null);
+	                        setOpenBulkMenuInstanceId(
+	                          openBulkMenuInstanceId === group.instance.id ? null : group.instance.id,
+	                        );
+	                      }}
+	                    >
                       <MoreHorizontal className="h-4 w-4" />
                     </Button>
                     {openBulkMenuInstanceId === group.instance.id ? (
@@ -2712,6 +2956,123 @@ function AuthFilesSection({
       </Dialog>
 
       <Dialog
+        open={exchangeDialog !== null}
+        onOpenChange={(open) => {
+          if (!open && !exchangeDialog?.submitting) {
+            setExchangeDialog(null);
+          }
+        }}
+      >
+        <DialogContent className="sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>{exchangeDialog?.mode === "move" ? "移动账号" : "取号"}</DialogTitle>
+            <DialogDescription>
+              {exchangeDialog?.instance.name ?? "当前 CPA"} 的 Auth 文件。
+            </DialogDescription>
+          </DialogHeader>
+          {exchangeDialog ? (
+            <div className="grid gap-3">
+              {exchangeDialog.mode === "move" ? (
+                <div className="grid gap-2">
+                  <Label htmlFor="exchange-target-cpa">目标 CPA</Label>
+                  <select
+                    id="exchange-target-cpa"
+                    value={exchangeDialog.targetCpaInstanceId}
+                    disabled={exchangeDialog.submitting || exchangeMoveOptions.length === 0}
+                    onChange={(event) =>
+                      setExchangeDialog((current) =>
+                        current ? { ...current, targetCpaInstanceId: event.target.value } : current,
+                      )
+                    }
+                    className="h-9 rounded-md border border-input bg-background px-3 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:opacity-50"
+                  >
+                    {exchangeMoveOptions.map((instance) => (
+                      <option key={instance.id} value={instance.id}>
+                        {instance.name}
+                      </option>
+                    ))}
+                  </select>
+                  {exchangeMoveOptions.length === 0 ? (
+                    <div className="text-sm text-muted-foreground">没有其他已启用 CPA 可移动。</div>
+                  ) : null}
+                </div>
+              ) : null}
+              <div className="overflow-hidden rounded-md border">
+                <label className="flex items-center gap-2 border-b bg-muted/35 px-3 py-2 text-sm font-medium">
+                  <Checkbox
+                    checked={exchangeAllSelected}
+                    disabled={exchangeDialog.submitting || exchangeDialog.rows.length === 0}
+                    onCheckedChange={(checked) => setAllExchangeRowsSelected(Boolean(checked))}
+                  />
+                  全选
+                  <span className="ml-auto text-xs font-normal text-muted-foreground">
+                    {exchangeDialog.rows.length} 个
+                  </span>
+                </label>
+                <div className="max-h-[45vh] overflow-auto">
+                  {exchangeDialog.rows.length === 0 ? (
+                    <div className="px-3 py-8 text-center text-sm text-muted-foreground">暂无数据</div>
+                  ) : (
+                    exchangeDialog.rows.map((row) => (
+                      <label
+                        key={row.id}
+                        className="flex cursor-pointer items-center gap-3 px-3 py-2 hover:bg-muted/50"
+                      >
+                        <Checkbox
+                          checked={exchangeDialog.selectedIds.includes(row.id)}
+                          disabled={exchangeDialog.submitting}
+                          onCheckedChange={(checked) => updateExchangeSelection(row.id, Boolean(checked))}
+                        />
+                        <SubscriptionBadge value={row.subscriptionType} />
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate text-xs font-medium">
+                            {row.email ?? "-"}
+                          </span>
+                          <span className="block truncate font-mono text-[11px] text-muted-foreground">
+                            {row.fileName}
+                          </span>
+                        </span>
+                      </label>
+                    ))
+                  )}
+                </div>
+              </div>
+            </div>
+          ) : null}
+          <DialogFooter className="items-center sm:justify-between">
+            <div className="w-full text-xs text-muted-foreground sm:w-auto">
+              已选择 {exchangeSelectedCount} 个
+            </div>
+            <div className="flex w-full flex-col-reverse gap-2 sm:w-auto sm:flex-row">
+              <Button
+                type="button"
+                variant="outline"
+                disabled={exchangeDialog?.submitting}
+                onClick={() => setExchangeDialog(null)}
+              >
+                取消
+              </Button>
+              <Button
+                type="button"
+                disabled={
+                  !exchangeDialog ||
+                  exchangeDialog.submitting ||
+                  exchangeSelectedCount === 0 ||
+                  (exchangeDialog.mode === "move" && !exchangeDialog.targetCpaInstanceId)
+                }
+                onClick={() => void submitExchangeDialog()}
+              >
+                {exchangeDialog?.submitting ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : null}
+                确定
+              </Button>
+            </div>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
         open={bulkExceptionTarget !== null}
         onOpenChange={(open) => !open && setBulkExceptionTarget(null)}
       >
@@ -2778,6 +3139,7 @@ type AuthFileQuotaRow = {
   usage5hResetAt: string | null;
   usageWeekResetAt: string | null;
   exception: string | null;
+  createdAt: string;
   refreshedAt: string;
 };
 
@@ -2947,14 +3309,17 @@ function CompactAuthFileTable({
                             setOpenActionRowId(null);
                             return;
                           }
-                          const rect = event.currentTarget.getBoundingClientRect();
-                          const menuWidth = 128;
-                          setActionMenuPosition({
-                            left: Math.min(Math.max(rect.right - menuWidth, 8), window.innerWidth - menuWidth - 8),
-                            top: rect.bottom + 6,
-                          });
-                          setOpenActionRowId(row.id);
-                        }}
+	                          const rect = event.currentTarget.getBoundingClientRect();
+	                          setActionMenuPosition(
+	                            getFloatingMenuPosition(rect, {
+	                              menuWidth: 128,
+	                              menuHeight: 166,
+	                              viewportWidth: window.innerWidth,
+	                              viewportHeight: window.innerHeight,
+	                            }),
+	                          );
+	                          setOpenActionRowId(row.id);
+	                        }}
                       >
                         <MoreHorizontal className="h-4 w-4" />
                       </Button>
@@ -3159,6 +3524,7 @@ function accountTooltipItems(row: AuthFileQuotaRow) {
   return compactTooltipItems([
     { label: "邮箱", value: row.email ?? "" },
     { label: "文件名", value: row.fileName },
+    { label: "添加时间", value: formatDate(row.createdAt) },
   ]);
 }
 
@@ -3363,6 +3729,7 @@ function mergeAuthFilesWithQuotas(
       usage5hResetAt: quota?.usage5hResetAt ?? null,
       usageWeekResetAt: quota?.usageWeekResetAt ?? null,
       exception,
+      createdAt: file.createdAt,
       refreshedAt: quota?.capturedAt ?? file.lastSyncedAt,
     };
   });
@@ -4054,6 +4421,54 @@ async function mutate<T = { status: string }>(url: string, init: RequestInit): P
     throw new Error(payload.error ?? response.statusText);
   }
   return payload as T;
+}
+
+async function readFetchError(response: Response) {
+  try {
+    const payload = await response.json() as { error?: string };
+    return payload.error ?? response.statusText;
+  } catch {
+    return response.statusText;
+  }
+}
+
+function downloadBlob(blob: Blob, fileName: string) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function fileNameFromContentDisposition(value: string | null) {
+  if (!value) {
+    return null;
+  }
+
+  const utf8Match = value.match(/filename\*=UTF-8''([^;]+)/i);
+  if (utf8Match?.[1]) {
+    return decodeURIComponent(utf8Match[1]);
+  }
+
+  const quotedMatch = value.match(/filename="([^"]+)"/i);
+  if (quotedMatch?.[1]) {
+    return quotedMatch[1];
+  }
+
+  return null;
+}
+
+function formatDownloadTimestamp(date: Date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const hour = String(date.getHours()).padStart(2, "0");
+  const minute = String(date.getMinutes()).padStart(2, "0");
+  const second = String(date.getSeconds()).padStart(2, "0");
+  return `${year}${month}${day}-${hour}${minute}${second}`;
 }
 
 function formatDate(value: string | null) {

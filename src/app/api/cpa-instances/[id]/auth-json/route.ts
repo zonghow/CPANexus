@@ -454,6 +454,7 @@ function upsertLocalAuthFile(
       available: true,
       proxyUrl: file.proxyUrl,
       rawJson: JSON.stringify(file.payload),
+      createdAt: savedAt,
       lastSyncedAt: savedAt,
     })
     .onConflictDoUpdate({

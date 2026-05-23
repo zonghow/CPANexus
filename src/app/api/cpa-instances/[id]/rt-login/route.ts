@@ -211,6 +211,7 @@ function upsertLocalAuthFile(
       statusMessage: "uploaded by CPA Nexus RT login",
       available: true,
       rawJson: JSON.stringify(entry.payload),
+      createdAt: savedAt,
       lastSyncedAt: savedAt,
     })
     .onConflictDoUpdate({

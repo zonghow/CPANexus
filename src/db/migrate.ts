@@ -34,6 +34,7 @@ export function migrate() {
       proxy_url TEXT,
       size INTEGER,
       raw_json TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       last_synced_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
     CREATE UNIQUE INDEX IF NOT EXISTS auth_files_instance_file_unique
@@ -82,8 +83,90 @@ export function migrate() {
   if (!hasColumn(sqlite, "proxies", "name")) {
     sqlite.exec("ALTER TABLE proxies ADD COLUMN name TEXT NOT NULL DEFAULT ''");
   }
+  if (!hasColumn(sqlite, "auth_files", "created_at")) {
+    sqlite.exec(`
+      ALTER TABLE auth_files ADD COLUMN created_at TEXT;
+      UPDATE auth_files
+        SET created_at = COALESCE(last_synced_at, CURRENT_TIMESTAMP)
+        WHERE created_at IS NULL OR TRIM(created_at) = '';
+    `);
+  }
 
   sqlite.exec(`
+    UPDATE auth_files
+      SET created_at = COALESCE(last_synced_at, CURRENT_TIMESTAMP)
+      WHERE created_at IS NULL OR TRIM(created_at) = '';
+    UPDATE auth_files
+      SET created_at = COALESCE(
+        json_extract(raw_json, '$.created_at'),
+        json_extract(raw_json, '$.createdAt'),
+        json_extract(raw_json, '$.creation_time'),
+        json_extract(raw_json, '$.creationTime'),
+        json_extract(raw_json, '$.added_at'),
+        json_extract(raw_json, '$.addedAt'),
+        json_extract(raw_json, '$.add_time'),
+        json_extract(raw_json, '$.addTime'),
+        json_extract(raw_json, '$.uploaded_at'),
+        json_extract(raw_json, '$.uploadedAt'),
+        json_extract(raw_json, '$.upload_time'),
+        json_extract(raw_json, '$.uploadTime'),
+        json_extract(raw_json, '$.created'),
+        json_extract(raw_json, '$.added'),
+        json_extract(raw_json, '$.uploaded')
+      )
+      WHERE raw_json IS NOT NULL
+        AND json_valid(raw_json)
+        AND COALESCE(
+          json_extract(raw_json, '$.created_at'),
+          json_extract(raw_json, '$.createdAt'),
+          json_extract(raw_json, '$.creation_time'),
+          json_extract(raw_json, '$.creationTime'),
+          json_extract(raw_json, '$.added_at'),
+          json_extract(raw_json, '$.addedAt'),
+          json_extract(raw_json, '$.add_time'),
+          json_extract(raw_json, '$.addTime'),
+          json_extract(raw_json, '$.uploaded_at'),
+          json_extract(raw_json, '$.uploadedAt'),
+          json_extract(raw_json, '$.upload_time'),
+          json_extract(raw_json, '$.uploadTime'),
+          json_extract(raw_json, '$.created'),
+          json_extract(raw_json, '$.added'),
+          json_extract(raw_json, '$.uploaded')
+        ) IS NOT NULL
+        AND TRIM(COALESCE(
+          json_extract(raw_json, '$.created_at'),
+          json_extract(raw_json, '$.createdAt'),
+          json_extract(raw_json, '$.creation_time'),
+          json_extract(raw_json, '$.creationTime'),
+          json_extract(raw_json, '$.added_at'),
+          json_extract(raw_json, '$.addedAt'),
+          json_extract(raw_json, '$.add_time'),
+          json_extract(raw_json, '$.addTime'),
+          json_extract(raw_json, '$.uploaded_at'),
+          json_extract(raw_json, '$.uploadedAt'),
+          json_extract(raw_json, '$.upload_time'),
+          json_extract(raw_json, '$.uploadTime'),
+          json_extract(raw_json, '$.created'),
+          json_extract(raw_json, '$.added'),
+          json_extract(raw_json, '$.uploaded')
+        )) != ''
+        AND COALESCE(
+          json_extract(raw_json, '$.created_at'),
+          json_extract(raw_json, '$.createdAt'),
+          json_extract(raw_json, '$.creation_time'),
+          json_extract(raw_json, '$.creationTime'),
+          json_extract(raw_json, '$.added_at'),
+          json_extract(raw_json, '$.addedAt'),
+          json_extract(raw_json, '$.add_time'),
+          json_extract(raw_json, '$.addTime'),
+          json_extract(raw_json, '$.uploaded_at'),
+          json_extract(raw_json, '$.uploadedAt'),
+          json_extract(raw_json, '$.upload_time'),
+          json_extract(raw_json, '$.uploadTime'),
+          json_extract(raw_json, '$.created'),
+          json_extract(raw_json, '$.added'),
+          json_extract(raw_json, '$.uploaded')
+        ) < created_at;
     UPDATE proxies SET name = url WHERE name = '';
     UPDATE proxies SET max_auth_files = 10 WHERE max_auth_files IS NULL OR max_auth_files < 1;
     UPDATE auth_files

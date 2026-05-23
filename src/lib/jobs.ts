@@ -278,14 +278,18 @@ async function syncAuthFilesForInstance(
 
     let rawJson: string | null = JSON.stringify(remoteFile);
     let downloadedProxyUrl: string | null = null;
+    let downloadedCreatedAt: string | null = null;
     try {
       const downloaded = await downloadRemoteAuthFile(instance, fileName);
       downloadedProxyUrl = proxyUrlFromDownloadedAuthFile(downloaded);
+      downloadedCreatedAt = authFileCreatedAt(downloaded);
       rawJson = JSON.stringify(downloaded);
     } catch {
       rawJson = JSON.stringify(remoteFile);
     }
     const proxyUrl = stringOrNull(remoteFile.proxy_url) ?? downloadedProxyUrl;
+    const syncedAt = nowIso();
+    const createdAt = authFileCreatedAt(remoteFile) ?? downloadedCreatedAt ?? syncedAt;
 
     db.insert(authFiles)
       .values({
@@ -303,7 +307,8 @@ async function syncAuthFilesForInstance(
         proxyUrl,
         size: typeof remoteFile.size === "number" ? remoteFile.size : null,
         rawJson,
-        lastSyncedAt: nowIso(),
+        createdAt,
+        lastSyncedAt: syncedAt,
       })
       .onConflictDoUpdate({
         target: [authFiles.cpaInstanceId, authFiles.fileName],
@@ -320,11 +325,81 @@ async function syncAuthFilesForInstance(
           proxyUrl,
           size: typeof remoteFile.size === "number" ? remoteFile.size : null,
           rawJson,
-          lastSyncedAt: nowIso(),
+          createdAt: sql`
+            CASE
+              WHEN ${authFiles.createdAt} IS NULL OR trim(${authFiles.createdAt}) = '' THEN ${createdAt}
+              WHEN ${createdAt} < ${authFiles.createdAt} THEN ${createdAt}
+              ELSE ${authFiles.createdAt}
+            END
+          `,
+          lastSyncedAt: syncedAt,
         },
       })
       .run();
   }
+}
+
+function authFileCreatedAt(value: unknown) {
+  const record = objectRecord(value);
+  if (!record) {
+    return null;
+  }
+
+  for (const key of authFileCreatedAtKeys) {
+    const normalized = normalizeTimestamp(record[key]);
+    if (normalized) {
+      return normalized;
+    }
+  }
+
+  return null;
+}
+
+const authFileCreatedAtKeys = [
+  "created_at",
+  "createdAt",
+  "creation_time",
+  "creationTime",
+  "added_at",
+  "addedAt",
+  "add_time",
+  "addTime",
+  "uploaded_at",
+  "uploadedAt",
+  "upload_time",
+  "uploadTime",
+  "created",
+  "added",
+  "uploaded",
+];
+
+function normalizeTimestamp(value: unknown) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const timestamp = value < 10_000_000_000 ? value * 1000 : value;
+    return dateToIso(timestamp);
+  }
+
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const numeric = Number(trimmed);
+  if (Number.isFinite(numeric) && /^\d+(\.\d+)?$/.test(trimmed)) {
+    const timestamp = numeric < 10_000_000_000 ? numeric * 1000 : numeric;
+    return dateToIso(timestamp);
+  }
+
+  return dateToIso(trimmed);
+}
+
+function dateToIso(value: string | number) {
+  const timestamp = new Date(value).getTime();
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null;
 }
 
 async function syncQuotasForInstance(instance: CpaInstance, remoteFiles?: RemoteAuthFile[]) {
@@ -487,6 +562,12 @@ function remoteAuthFileFromLocal(authFile: AuthFile): RemoteAuthFile {
   };
 }
 
+function objectRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
 function parseRecord(rawJson: string | null): Record<string, unknown> {
   if (!rawJson) {
     return {};
@@ -494,8 +575,9 @@ function parseRecord(rawJson: string | null): Record<string, unknown> {
 
   try {
     const parsed = JSON.parse(rawJson) as unknown;
-    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
-      return parsed as Record<string, unknown>;
+    const record = objectRecord(parsed);
+    if (record) {
+      return record;
     }
   } catch {
     return {};

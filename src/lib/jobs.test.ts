@@ -168,6 +168,91 @@ describe("sync jobs", () => {
     ).toEqual({ proxy_url: proxyUrl });
   });
 
+  it("records each remote auth file creation time and preserves it across later syncs", async () => {
+    const sqlite = await setupSqlite();
+    const cpaInstanceId = insertInstance(sqlite);
+    const cpaClient = await import("@/lib/cpa-client");
+    vi.mocked(cpaClient.listRemoteAuthFiles)
+      .mockResolvedValueOnce([
+        {
+          name: "first@example.com.json",
+          email: "first@example.com",
+          type: "codex",
+          created_at: "2026-05-20T08:30:00.000Z",
+        },
+        {
+          name: "second@example.com.json",
+          email: "second@example.com",
+          type: "codex",
+          uploaded_at: "2026-05-21T09:45:00.000Z",
+        },
+      ])
+      .mockResolvedValueOnce([
+        {
+          name: "first@example.com.json",
+          email: "first@example.com",
+          type: "codex",
+          created_at: "2026-05-24T01:38:00.000Z",
+        },
+        {
+          name: "second@example.com.json",
+          email: "second@example.com",
+          type: "codex",
+          uploaded_at: "2026-05-24T01:38:00.000Z",
+        },
+      ]);
+    vi.mocked(cpaClient.downloadRemoteAuthFile).mockRejectedValue(new Error("download skipped"));
+    vi.mocked(cpaClient.refreshRemoteQuotas).mockResolvedValue([]);
+    const jobs = await import("./jobs");
+
+    await jobs.syncCpaInstances();
+    await jobs.syncCpaInstances();
+
+    expect(
+      sqlite
+        .prepare(`
+          SELECT file_name, created_at
+          FROM auth_files
+          WHERE cpa_instance_id = ?
+          ORDER BY file_name
+        `)
+        .all(cpaInstanceId),
+    ).toEqual([
+      {
+        file_name: "first@example.com.json",
+        created_at: "2026-05-20T08:30:00.000Z",
+      },
+      {
+        file_name: "second@example.com.json",
+        created_at: "2026-05-21T09:45:00.000Z",
+      },
+    ]);
+  });
+
+  it("uses downloaded auth payload creation time when the list item does not include it", async () => {
+    const sqlite = await setupSqlite();
+    const cpaInstanceId = insertInstance(sqlite);
+    const cpaClient = await import("@/lib/cpa-client");
+    vi.mocked(cpaClient.listRemoteAuthFiles).mockResolvedValue([
+      { name: "downloaded@example.com.json", email: "downloaded@example.com", type: "codex" },
+    ]);
+    vi.mocked(cpaClient.downloadRemoteAuthFile).mockResolvedValue({
+      type: "codex",
+      email: "downloaded@example.com",
+      added_at: "2026-05-22T10:15:00.000Z",
+    });
+    vi.mocked(cpaClient.refreshRemoteQuotas).mockResolvedValue([]);
+    const jobs = await import("./jobs");
+
+    await jobs.syncCpaInstances();
+
+    expect(
+      sqlite
+        .prepare("SELECT created_at FROM auth_files WHERE cpa_instance_id = ? AND file_name = ?")
+        .get(cpaInstanceId, "downloaded@example.com.json"),
+    ).toEqual({ created_at: "2026-05-22T10:15:00.000Z" });
+  });
+
   it("records a dashboard metric snapshot after syncing quotas", async () => {
     const sqlite = await setupSqlite();
     const cpaInstanceId = insertInstance(sqlite);
