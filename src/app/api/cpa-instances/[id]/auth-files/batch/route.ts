@@ -24,12 +24,13 @@ import {
   syncCpaInstanceById,
   type CpaInstanceSyncResult,
 } from "@/lib/jobs";
+import { portalAuthFileToExceptionPool } from "@/lib/exception-auth-files";
 import { extractSubscriptionType, isFreeSubscriptionType } from "@/lib/subscription";
 import { buildZipArchive } from "@/lib/zip";
 
 export const runtime = "nodejs";
 
-type BatchAction = "delete" | "disable" | "autoAssignProxy" | "download" | "move";
+type BatchAction = "delete" | "disable" | "autoAssignProxy" | "download" | "move" | "portalExceptions";
 type BatchTarget = "selected" | "free";
 
 export async function POST(
@@ -59,9 +60,10 @@ export async function POST(
       body.action !== "disable" &&
       body.action !== "autoAssignProxy" &&
       body.action !== "download" &&
-      body.action !== "move"
+      body.action !== "move" &&
+      body.action !== "portalExceptions"
     ) {
-      return badRequest("action must be delete, disable, autoAssignProxy, download, or move");
+      return badRequest("action must be delete, disable, autoAssignProxy, download, move, or portalExceptions");
     }
     if (body.target !== undefined && body.target !== "selected" && body.target !== "free") {
       return badRequest("target must be selected or free");
@@ -135,6 +137,23 @@ export async function POST(
         action: body.action,
         processed: rows.length,
         sync: await syncAffectedCpaInstances([cpaInstanceId, targetInstance.id]),
+      });
+    }
+
+    if (body.action === "portalExceptions") {
+      const rows = loadSelectedAuthFiles(cpaInstanceId, body.authFileIds);
+      if (rows instanceof Response) {
+        return rows;
+      }
+
+      for (const authFile of rows) {
+        await portalAuthFileToExceptionPool(instance, authFile);
+      }
+
+      return okWithOptionalSync({
+        action: body.action,
+        processed: rows.length,
+        sync: await syncAffectedCpaInstance(cpaInstanceId),
       });
     }
 

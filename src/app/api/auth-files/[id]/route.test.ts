@@ -370,6 +370,93 @@ describe("/api/auth-files/[id]", () => {
     });
   });
 
+  it("portals an auth file into the exception pool and removes it from the source CPA", async () => {
+    const sqlite = await setupSqlite();
+    const sourceId = insertInstance(sqlite, {
+      name: "source",
+      baseUrl: "https://source.example.com",
+    });
+    const authFileId = insertAuthFile(sqlite, sourceId);
+    insertQuotaSnapshot(sqlite, sourceId);
+
+    const cpaClient = await import("@/lib/cpa-client");
+    const jobs = await import("@/lib/jobs");
+    vi.mocked(cpaClient.downloadRemoteAuthFile).mockResolvedValue({
+      email: "remote@example.com",
+      refresh_token: "rt_remote",
+    });
+    vi.mocked(cpaClient.deleteRemoteAuthFile).mockResolvedValue(undefined);
+    vi.mocked(jobs.syncCpaInstanceById).mockResolvedValue({
+      instance: "source",
+      status: "success",
+      message: "synced",
+    });
+    const route = await import("./route");
+
+    const response = await route.POST(
+      new Request("http://localhost/api/auth-files/1", {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ action: "portalException" }),
+      }),
+      { params: Promise.resolve({ id: String(authFileId) }) },
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ status: "ok" });
+    expect(cpaClient.downloadRemoteAuthFile).toHaveBeenCalledWith(
+      expect.objectContaining({ id: sourceId }),
+      "codex-a@example.com-auto.json",
+    );
+    expect(cpaClient.deleteRemoteAuthFile).toHaveBeenCalledWith(
+      expect.objectContaining({ id: sourceId }),
+      "codex-a@example.com-auto.json",
+    );
+    expect(jobs.syncCpaInstanceById).toHaveBeenCalledWith(sourceId);
+    expect(sqlite.prepare("SELECT COUNT(*) AS count FROM auth_files").get()).toMatchObject({ count: 0 });
+    expect(sqlite.prepare("SELECT COUNT(*) AS count FROM quota_snapshots").get()).toMatchObject({ count: 0 });
+    expect(
+      sqlite
+        .prepare("SELECT source_cpa_instance_name, file_name, email, last_error, raw_json FROM exception_auth_files")
+        .get(),
+    ).toMatchObject({
+      source_cpa_instance_name: "source",
+      file_name: "codex-a@example.com-auto.json",
+      email: "a@example.com",
+      last_error: "available",
+      raw_json: JSON.stringify({ email: "remote@example.com", refresh_token: "rt_remote" }),
+    });
+  });
+
+  it("does not portal an auth file when remote download fails and local raw_json is unavailable", async () => {
+    const sqlite = await setupSqlite();
+    const sourceId = insertInstance(sqlite, {
+      name: "source",
+      baseUrl: "https://source.example.com",
+    });
+    const authFileId = insertAuthFile(sqlite, sourceId);
+    sqlite.prepare("UPDATE auth_files SET raw_json = NULL WHERE id = ?").run(authFileId);
+
+    const cpaClient = await import("@/lib/cpa-client");
+    vi.mocked(cpaClient.downloadRemoteAuthFile).mockRejectedValue(new Error("download failed"));
+    const route = await import("./route");
+
+    const response = await route.POST(
+      new Request("http://localhost/api/auth-files/1", {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ action: "portalException" }),
+      }),
+      { params: Promise.resolve({ id: String(authFileId) }) },
+    );
+
+    expect(response.status).toBe(500);
+    await expect(response.json()).resolves.toEqual({ error: "auth file payload is unavailable" });
+    expect(cpaClient.deleteRemoteAuthFile).not.toHaveBeenCalled();
+    expect(sqlite.prepare("SELECT COUNT(*) AS count FROM auth_files").get()).toMatchObject({ count: 1 });
+    expect(sqlite.prepare("SELECT COUNT(*) AS count FROM exception_auth_files").get()).toMatchObject({ count: 0 });
+  });
+
   it("refreshes quota for the selected auth file", async () => {
     const jobs = await import("@/lib/jobs");
     vi.mocked(jobs.refreshAuthFileQuotaById).mockResolvedValue({

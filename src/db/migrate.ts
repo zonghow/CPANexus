@@ -40,6 +40,20 @@ export function migrate() {
     CREATE UNIQUE INDEX IF NOT EXISTS auth_files_instance_file_unique
       ON auth_files(cpa_instance_id, file_name);
 
+    CREATE TABLE IF NOT EXISTS exception_auth_files (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      source_cpa_instance_id INTEGER,
+      source_cpa_instance_name TEXT NOT NULL,
+      file_name TEXT NOT NULL,
+      email TEXT,
+      last_error TEXT,
+      raw_json TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS exception_auth_files_file_unique
+      ON exception_auth_files(file_name);
+
     CREATE TABLE IF NOT EXISTS quota_snapshots (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       cpa_instance_id INTEGER NOT NULL REFERENCES cpa_instances(id) ON DELETE CASCADE,
