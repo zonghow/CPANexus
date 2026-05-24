@@ -69,6 +69,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { DataBoardSection } from "@/components/data-board-section";
 import { MessagePushSection } from "@/components/message-push-section";
 import { resolveAccountQuotaStatus, type AccountQuotaState } from "@/lib/account-quota-status";
+import { selectAvailableAuthFileIds } from "@/lib/auth-exchange-selection";
 import { sortAccountRows } from "@/lib/account-sort";
 import { onlyEnabledCpaGroups } from "@/lib/cpa-groups";
 import { cpaTableUpdatingIdsForJob, jobFinishedAtOrAfter } from "@/lib/cpa-sync-targets";
@@ -309,6 +310,7 @@ const defaultJobRunsPagination: JobRunsPagination = {
 const syncJobKey = "sync-cpa-instances";
 const scheduledSyncPollIntervalMs = 2000;
 const scheduledSyncTimeoutMs = 10 * 60 * 1000;
+const authExchangeQuickSelectCounts = [10, 20, 50, 100] as const;
 
 export function CpaDashboard({ section = "instances" }: { section?: SectionId }) {
   const activeSection = section;
@@ -1602,6 +1604,17 @@ function AuthFilesSection({
     );
   }
 
+  function quickSelectExchangeRows(count: number) {
+    setExchangeDialog((current) =>
+      current
+        ? {
+            ...current,
+            selectedIds: selectAvailableAuthFileIds(current.rows, count),
+          }
+        : current,
+    );
+  }
+
   async function submitExchangeDialog() {
     if (!exchangeDialog || exchangeDialog.selectedIds.length === 0) {
       return;
@@ -2060,6 +2073,9 @@ function AuthFilesSection({
     ? enabledInstances.filter((instance) => instance.id !== exchangeDialog.instance.id)
     : [];
   const exchangeSelectedCount = exchangeDialog?.selectedIds.length ?? 0;
+  const exchangeAvailableCount = exchangeDialog
+    ? selectAvailableAuthFileIds(exchangeDialog.rows, exchangeDialog.rows.length).length
+    : 0;
   const exchangeAllSelected = Boolean(
     exchangeDialog &&
       exchangeDialog.rows.length > 0 &&
@@ -2997,6 +3013,24 @@ function AuthFilesSection({
                   ) : null}
                 </div>
               ) : null}
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs text-muted-foreground">快速选择</span>
+                {authExchangeQuickSelectCounts.map((count) => (
+                  <Button
+                    key={count}
+                    type="button"
+                    size="xs"
+                    variant="outline"
+                    disabled={exchangeDialog.submitting || exchangeAvailableCount === 0}
+                    onClick={() => quickSelectExchangeRows(count)}
+                  >
+                    选{count}
+                  </Button>
+                ))}
+                <span className="text-xs text-muted-foreground">
+                  可用 {exchangeAvailableCount} 个
+                </span>
+              </div>
               <div className="overflow-hidden rounded-md border">
                 <label className="flex items-center gap-2 border-b bg-muted/35 px-3 py-2 text-sm font-medium">
                   <Checkbox
