@@ -3,11 +3,13 @@
 import {
   Activity,
   ArrowLeftRight,
+  ArchiveX,
   BarChart3,
   Bell,
   ChevronLeft,
   ChevronRight,
   Copy,
+  Download,
   ExternalLink,
   FileKey2,
   Loader2,
@@ -113,6 +115,18 @@ type AuthFile = {
   lastSyncedAt: string;
 };
 
+type ExceptionAuthFile = {
+  id: number;
+  sourceCpaInstanceId: number | null;
+  sourceCpaInstanceName: string;
+  fileName: string;
+  email: string | null;
+  lastError: string | null;
+  rawJson: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
 type QuotaSnapshot = {
   id: number;
   email: string | null;
@@ -187,7 +201,7 @@ type JobsApiResponse = {
   runsPagination: JobRunsPagination;
 };
 
-type BatchExceptionAction = "delete" | "disable";
+type BatchExceptionAction = "delete" | "disable" | "portalExceptions";
 type BatchAuthFileTarget = "selected" | "free";
 type AuthExchangeMode = "download" | "move";
 
@@ -245,6 +259,7 @@ type CpaJsonUploadSource = "session-json";
 
 const navItems = [
   { id: "auth", label: "账号管理", icon: FileKey2, href: "/auth" },
+  { id: "exceptions", label: "异常账号", icon: ArchiveX, href: "/exceptions" },
   { id: "dashboard", label: "数据看板", icon: BarChart3, href: "/dashboard" },
   { id: "instances", label: "CPA管理", icon: Server, href: "/instances" },
   { id: "proxies", label: "代理管理", icon: Network, href: "/proxies" },
@@ -314,6 +329,7 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
   const activeSection = section;
   const [instances, setInstances] = useState<CpaInstance[]>([]);
   const [authGroups, setAuthGroups] = useState<Array<{ instance: CpaInstance; authFiles: AuthFile[] }>>([]);
+  const [exceptionAuthFiles, setExceptionAuthFiles] = useState<ExceptionAuthFile[]>([]);
   const [quotaGroups, setQuotaGroups] = useState<Array<{ instance: CpaInstance; quotas: QuotaSnapshot[] }>>([]);
   const [proxies, setProxies] = useState<ProxyRow[]>([]);
   const [jobs, setJobs] = useState<CronJob[]>([]);
@@ -398,16 +414,18 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
         runsPage: String(requestedRunsPage),
         runsPageSize: String(requestedRunsPageSize),
       });
-      const [instanceRes, authRes, quotaRes, proxyRes, jobRes] =
+      const [instanceRes, authRes, exceptionRes, quotaRes, proxyRes, jobRes] =
         await Promise.all([
           fetchJson<{ instances: CpaInstance[] }>("/api/cpa-instances"),
           fetchJson<{ groups: Array<{ instance: CpaInstance; authFiles: AuthFile[] }> }>("/api/auth-files"),
+          fetchJson<{ exceptionAuthFiles: ExceptionAuthFile[] }>("/api/exception-auth-files"),
           fetchJson<{ groups: Array<{ instance: CpaInstance; quotas: QuotaSnapshot[] }> }>("/api/quotas"),
           fetchJson<{ proxies: ProxyRow[]; instances: CpaInstance[] }>("/api/proxies"),
           fetchJson<JobsApiResponse>(`/api/jobs?${jobsSearchParams.toString()}`),
         ]);
       setInstances(instanceRes.instances);
       setAuthGroups(authRes.groups);
+      setExceptionAuthFiles(exceptionRes.exceptionAuthFiles);
       setQuotaGroups(quotaRes.groups);
       setProxies(proxyRes.proxies);
       applyJobsResponse(jobRes);
@@ -821,6 +839,69 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
     return result;
   }
 
+  async function portalExceptionAuthFile(id: number) {
+    const sourceCpaInstanceId = findAuthFileCpaInstanceId(id);
+    try {
+      await withUpdatingCpaTables([sourceCpaInstanceId], async () => {
+        await mutate(`/api/auth-files/${id}`, {
+          method: "POST",
+          body: JSON.stringify({ action: "portalException" }),
+        });
+        toast.success("账号已清理到异常账号");
+        await loadAll();
+      });
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function deleteExceptionAuthFile(id: number) {
+    try {
+      await mutate(`/api/exception-auth-files/${id}`, { method: "DELETE" });
+      toast.success("异常账号已删除");
+      await loadAll();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function clearExceptionAuthFiles() {
+    try {
+      const result = await mutate<{ deleted: number }>("/api/exception-auth-files", { method: "DELETE" });
+      toast.success(`已清空 ${result.deleted} 个异常账号`);
+      await loadAll();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function moveExceptionAuthFile(id: number, targetCpaInstanceId: number) {
+    try {
+      await withUpdatingCpaTables([targetCpaInstanceId], async () => {
+        await mutate(`/api/exception-auth-files/${id}`, {
+          method: "PATCH",
+          body: JSON.stringify({ targetCpaInstanceId }),
+        });
+        toast.success("异常账号已移动");
+        await loadAll();
+      });
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  function exportExceptionAuthFileEmails() {
+    const csv = exceptionAuthFiles
+      .map((row) => row.email?.trim() ?? "")
+      .filter((email) => email.length > 0)
+      .map(csvCell)
+      .join("\n");
+    downloadBlob(
+      new Blob([csv ? `${csv}\n` : ""], { type: "text/csv;charset=utf-8" }),
+      `exception-auth-emails-${formatDownloadTimestamp(new Date())}.csv`,
+    );
+  }
+
   async function batchHandleExceptionAuthFiles(
     cpaInstanceId: number,
     action: BatchExceptionAction,
@@ -1066,6 +1147,7 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
                 updatingCpaIds={effectiveUpdatingCpaIds}
                 nowMs={nowMs}
                 onDeleteAuthFile={deleteAuthFile}
+                onPortalExceptionAuthFile={portalExceptionAuthFile}
                 onMoveAuthFile={moveAuthFile}
                 onToggleAuthFileDisabled={toggleAuthFileDisabled}
                 onConfigureAuthFileProxy={configureAuthFileProxy}
@@ -1080,6 +1162,17 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
                 onRefreshCpa={refreshCpaInstance}
                 onStartCodexOAuth={startCodexOAuthLogin}
                 onSubmitCodexOAuthCallback={submitCodexOAuthCallback}
+              />
+            ) : null}
+
+            {activeSection === "exceptions" ? (
+              <ExceptionAuthFilesSection
+                rows={exceptionAuthFiles}
+                instances={instances.filter((instance) => instance.enabled)}
+                onExport={exportExceptionAuthFileEmails}
+                onClear={clearExceptionAuthFiles}
+                onDelete={deleteExceptionAuthFile}
+                onMove={moveExceptionAuthFile}
               />
             ) : null}
 
@@ -1345,6 +1438,7 @@ function AuthFilesSection({
   updatingCpaIds,
   nowMs,
   onDeleteAuthFile,
+  onPortalExceptionAuthFile,
   onMoveAuthFile,
   onToggleAuthFileDisabled,
   onConfigureAuthFileProxy,
@@ -1366,6 +1460,7 @@ function AuthFilesSection({
   updatingCpaIds: Set<number>;
   nowMs: number;
   onDeleteAuthFile: (id: number) => Promise<void>;
+  onPortalExceptionAuthFile: (id: number) => Promise<void>;
   onMoveAuthFile: (id: number, targetCpaInstanceId: number) => Promise<void>;
   onToggleAuthFileDisabled: (id: number, disabled: boolean) => Promise<void>;
   onConfigureAuthFileProxy: (id: number, proxyUrl: string | null) => Promise<void>;
@@ -2270,12 +2365,12 @@ function AuthFilesSection({
                             setOpenBulkMenuInstanceId(null);
                             setBulkExceptionTarget({
                               instance: group.instance,
-                              action: "delete",
+                              action: "portalExceptions",
                               authFileIds: exceptionAuthFileIds,
                               title: "批量清理异常账号",
                               subject: "异常账号",
                               confirmVerb: "清理",
-                              successVerb: "已清理",
+                              successVerb: "已清理到异常账号",
                             });
                           }}
                         >
@@ -2383,6 +2478,7 @@ function AuthFilesSection({
                 nowMs={nowMs}
                 canMove={enabledInstances.length > 1}
                 onRequestDelete={setDeleteTarget}
+                onRequestPortalException={(row) => void onPortalExceptionAuthFile(row.id)}
                 onRequestMove={openMoveDialog}
                 onRequestConfigureProxy={openProxyDialog}
                 onToggleDisabled={onToggleAuthFileDisabled}
@@ -3089,13 +3185,22 @@ function AuthFilesSection({
               删除会从 CPA 中移除认证文件，并清理本地账号和配额记录。
             </p>
           ) : null}
+          {bulkExceptionTarget?.action === "portalExceptions" ? (
+            <p className="text-sm text-muted-foreground">
+              清理会先保存认证文件到异常账号池，再从 CPA 中移除认证文件和本地账号记录。
+            </p>
+          ) : null}
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => setBulkExceptionTarget(null)}>
               取消
             </Button>
             <Button
               type="button"
-              variant={bulkExceptionTarget?.action === "delete" ? "destructive" : "default"}
+              variant={
+                bulkExceptionTarget?.action === "delete" || bulkExceptionTarget?.action === "portalExceptions"
+                  ? "destructive"
+                  : "default"
+              }
               disabled={!bulkExceptionTarget || bulkExceptionTarget.authFileIds.length === 0}
               onClick={() => {
                 if (!bulkExceptionTarget || bulkExceptionTarget.authFileIds.length === 0) {
@@ -3114,6 +3219,204 @@ function AuthFilesSection({
               }}
             >
               确认{bulkExceptionTarget?.confirmVerb ?? "操作"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}
+
+function ExceptionAuthFilesSection({
+  rows,
+  instances,
+  onExport,
+  onClear,
+  onDelete,
+  onMove,
+}: {
+  rows: ExceptionAuthFile[];
+  instances: CpaInstance[];
+  onExport: () => void;
+  onClear: () => Promise<void>;
+  onDelete: (id: number) => Promise<void>;
+  onMove: (id: number, targetCpaInstanceId: number) => Promise<void>;
+}) {
+  const [deleteTarget, setDeleteTarget] = useState<ExceptionAuthFile | null>(null);
+  const [clearOpen, setClearOpen] = useState(false);
+  const [moveTarget, setMoveTarget] = useState<ExceptionAuthFile | null>(null);
+  const [moveTargetInstanceId, setMoveTargetInstanceId] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  function openMoveDialog(row: ExceptionAuthFile) {
+    const firstTarget = instances[0];
+    setMoveTarget(row);
+    setMoveTargetInstanceId(firstTarget ? String(firstTarget.id) : "");
+  }
+
+  async function submitMove() {
+    if (!moveTarget || !moveTargetInstanceId) {
+      return;
+    }
+    setSubmitting(true);
+    try {
+      await onMove(moveTarget.id, Number(moveTargetInstanceId));
+      setMoveTarget(null);
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <>
+      <section className="space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h2 className="text-base font-semibold">异常账号池</h2>
+            <p className="text-sm text-muted-foreground">共 {rows.length} 个异常账号</p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button type="button" size="sm" variant="outline" disabled={rows.length === 0} onClick={onExport}>
+              <Download className="h-4 w-4" />
+              导出
+            </Button>
+            <Button type="button" size="sm" variant="destructive" disabled={rows.length === 0} onClick={() => setClearOpen(true)}>
+              <Trash2 className="h-4 w-4" />
+              删除全部
+            </Button>
+          </div>
+        </div>
+
+        <div className="overflow-x-auto rounded-md border bg-card">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>邮箱</TableHead>
+                <TableHead>文件名</TableHead>
+                <TableHead>添加时间</TableHead>
+                <TableHead>上次报错信息</TableHead>
+                <TableHead>来源 CPA</TableHead>
+                <TableHead className="text-right">操作</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {rows.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={6} className="h-24 text-center text-muted-foreground">
+                    暂无异常账号
+                  </TableCell>
+                </TableRow>
+              ) : (
+                rows.map((row) => (
+                  <TableRow key={row.id}>
+                    <TableCell className="max-w-[16rem] truncate font-medium">{row.email ?? "-"}</TableCell>
+                    <TableCell className="max-w-[18rem] truncate">{row.fileName}</TableCell>
+                    <TableCell className="whitespace-nowrap">{formatDate(row.createdAt)}</TableCell>
+                    <TableCell className="max-w-[20rem] truncate">{row.lastError ?? "-"}</TableCell>
+                    <TableCell className="max-w-[14rem] truncate">{row.sourceCpaInstanceName}</TableCell>
+                    <TableCell className="text-right">
+                      <div className="flex justify-end gap-2">
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          disabled={instances.length === 0}
+                          onClick={() => openMoveDialog(row)}
+                        >
+                          移动
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          className="text-rose-700 hover:bg-rose-50 hover:text-rose-800"
+                          onClick={() => setDeleteTarget(row)}
+                        >
+                          删除
+                        </Button>
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                ))
+              )}
+            </TableBody>
+          </Table>
+        </div>
+      </section>
+
+      <Dialog open={clearOpen} onOpenChange={setClearOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>删除全部异常账号</DialogTitle>
+            <DialogDescription>确定要清空异常账号池中的 {rows.length} 条记录吗？</DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setClearOpen(false)}>取消</Button>
+            <Button
+              type="button"
+              variant="destructive"
+              onClick={() => {
+                setClearOpen(false);
+                void onClear();
+              }}
+            >
+              删除全部
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={deleteTarget !== null} onOpenChange={(open) => !open && setDeleteTarget(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>删除异常账号</DialogTitle>
+            <DialogDescription>
+              确定要删除 {deleteTarget?.email ?? deleteTarget?.fileName ?? "这条记录"} 吗？这个操作只删除异常账号池记录。
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setDeleteTarget(null)}>取消</Button>
+            <Button
+              type="button"
+              variant="destructive"
+              onClick={() => {
+                const target = deleteTarget;
+                setDeleteTarget(null);
+                if (target) {
+                  void onDelete(target.id);
+                }
+              }}
+            >
+              删除
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={moveTarget !== null} onOpenChange={(open) => !open && setMoveTarget(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>移动异常账号</DialogTitle>
+            <DialogDescription>选择目标 CPA。确认后会上传认证文件到目标 CPA，并从异常账号池移除。</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Label htmlFor="exception-auth-target-cpa">目标 CPA</Label>
+            <select
+              id="exception-auth-target-cpa"
+              className={cn(compactControlClassName, "w-full")}
+              value={moveTargetInstanceId}
+              onChange={(event) => setMoveTargetInstanceId(event.target.value)}
+            >
+              {instances.map((instance) => (
+                <option key={instance.id} value={instance.id}>{instance.name}</option>
+              ))}
+            </select>
+          </div>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setMoveTarget(null)}>取消</Button>
+            <Button type="button" disabled={!moveTargetInstanceId || submitting} onClick={() => void submitMove()}>
+              {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+              移动
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -3148,6 +3451,7 @@ function CompactAuthFileTable({
   nowMs,
   canMove,
   onRequestDelete,
+  onRequestPortalException,
   onRequestMove,
   onRequestConfigureProxy,
   onToggleDisabled,
@@ -3157,6 +3461,7 @@ function CompactAuthFileTable({
   nowMs: number;
   canMove: boolean;
   onRequestDelete: (row: AuthFileQuotaRow) => void;
+  onRequestPortalException: (row: AuthFileQuotaRow) => void;
   onRequestMove: (row: AuthFileQuotaRow) => void;
   onRequestConfigureProxy: (row: AuthFileQuotaRow) => void;
   onToggleDisabled: (id: number, disabled: boolean) => Promise<void>;
@@ -3313,7 +3618,7 @@ function CompactAuthFileTable({
 	                          setActionMenuPosition(
 	                            getFloatingMenuPosition(rect, {
 	                              menuWidth: 128,
-	                              menuHeight: 166,
+	                              menuHeight: 202,
 	                              viewportWidth: window.innerWidth,
 	                              viewportHeight: window.innerHeight,
 	                            }),
@@ -3379,13 +3684,24 @@ function CompactAuthFileTable({
                               <button
                                 type="button"
                                 role="menuitem"
-                                className="flex w-full items-center rounded px-2 py-1.5 text-left text-xs text-rose-700 hover:bg-rose-50 hover:text-rose-800"
+                                className="flex w-full items-center rounded px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground"
                                 onClick={() => {
                                   setOpenActionRowId(null);
                                   onRequestDelete(row);
                                 }}
                               >
                                 删除
+                              </button>
+                              <button
+                                type="button"
+                                role="menuitem"
+                                className="flex w-full items-center rounded px-2 py-1.5 text-left text-xs text-rose-700 hover:bg-rose-50 hover:text-rose-800"
+                                onClick={() => {
+                                  setOpenActionRowId(null);
+                                  onRequestPortalException(row);
+                                }}
+                              >
+                                清理
                               </button>
                             </div>,
                             document.body,
@@ -4441,6 +4757,12 @@ function downloadBlob(blob: Blob, fileName: string) {
   link.click();
   link.remove();
   URL.revokeObjectURL(url);
+}
+
+function csvCell(value: string) {
+  return /[",\n\r]/.test(value)
+    ? `"${value.replaceAll("\"", "\"\"")}"`
+    : value;
 }
 
 function fileNameFromContentDisposition(value: string | null) {
