@@ -20,6 +20,7 @@ import {
   setRemoteAuthFileDisabled,
   uploadRemoteAuthFile,
 } from "@/lib/cpa-client";
+import { portalAuthFileToExceptionPool } from "@/lib/exception-auth-files";
 import {
   refreshAuthFileQuotaById,
   syncCpaInstanceById,
@@ -39,13 +40,32 @@ export async function POST(
     }
 
     const body = await readJson<{ action?: string }>(request);
-    if (body.action !== "refreshQuota") {
-      return badRequest("action must be refreshQuota");
+    if (body.action !== "refreshQuota" && body.action !== "portalException") {
+      return badRequest("action must be refreshQuota or portalException");
     }
 
     const id = parseIntegerId((await routeParams(context)).id);
     if (!id) {
       return badRequest("invalid id");
+    }
+
+    if (body.action === "portalException") {
+      initRequestDb();
+      const authFile = db.select().from(authFiles).where(eq(authFiles.id, id)).get();
+      if (!authFile) {
+        return notFound("auth file not found");
+      }
+      const sourceInstance = db
+        .select()
+        .from(cpaInstances)
+        .where(eq(cpaInstances.id, authFile.cpaInstanceId))
+        .get();
+      if (!sourceInstance) {
+        return notFound("CPA instance not found");
+      }
+
+      await portalAuthFileToExceptionPool(sourceInstance, authFile);
+      return okWithOptionalSync(await syncAffectedCpaInstances([sourceInstance.id]));
     }
 
     return ok(await refreshAuthFileQuotaById(id));
