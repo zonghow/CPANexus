@@ -235,4 +235,35 @@ describe("migrate", () => {
       expect.arrayContaining(["delivery_type"]),
     );
   });
+
+  it("creates exception auth file storage", async () => {
+    const { migrate } = await import("./migrate");
+    const { getSqlite } = await import("./client");
+
+    migrate();
+    const sqlite = getSqlite();
+
+    const columns = sqlite
+      .prepare("PRAGMA table_info(exception_auth_files)")
+      .all() as Array<{ name: string; notnull: number }>;
+    expect(columns.map((column) => column.name)).toEqual([
+      "id",
+      "source_cpa_instance_id",
+      "source_cpa_instance_name",
+      "file_name",
+      "email",
+      "last_error",
+      "raw_json",
+      "created_at",
+      "updated_at",
+    ]);
+    expect(columns.find((column) => column.name === "raw_json")?.notnull).toBe(1);
+
+    const indexes = sqlite
+      .prepare("PRAGMA index_list(exception_auth_files)")
+      .all() as Array<{ name: string }>;
+    expect(indexes.map((index) => index.name)).toEqual(
+      expect.arrayContaining(["exception_auth_files_file_unique"]),
+    );
+  });
 });

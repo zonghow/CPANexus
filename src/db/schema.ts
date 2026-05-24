@@ -54,6 +54,24 @@ export const authFiles = sqliteTable(
   ],
 );
 
+export const exceptionAuthFiles = sqliteTable(
+  "exception_auth_files",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    sourceCpaInstanceId: integer("source_cpa_instance_id"),
+    sourceCpaInstanceName: text("source_cpa_instance_name").notNull(),
+    fileName: text("file_name").notNull(),
+    email: text("email"),
+    lastError: text("last_error"),
+    rawJson: text("raw_json").notNull(),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("exception_auth_files_file_unique").on(table.fileName),
+  ],
+);
+
 export const quotaSnapshots = sqliteTable("quota_snapshots", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   cpaInstanceId: integer("cpa_instance_id")
@@ -244,6 +262,7 @@ export const messagePushDeliveries = sqliteTable(
 export type CpaInstance = typeof cpaInstances.$inferSelect;
 export type NewCpaInstance = typeof cpaInstances.$inferInsert;
 export type AuthFile = typeof authFiles.$inferSelect;
+export type ExceptionAuthFile = typeof exceptionAuthFiles.$inferSelect;
 export type CronJob = typeof cronJobs.$inferSelect;
 export type DashboardMetricSnapshot = typeof dashboardMetricSnapshots.$inferSelect;
 export type Proxy = typeof proxies.$inferSelect;
