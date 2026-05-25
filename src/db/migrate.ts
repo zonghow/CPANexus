@@ -54,6 +54,29 @@ export function migrate() {
     CREATE UNIQUE INDEX IF NOT EXISTS exception_auth_files_file_unique
       ON exception_auth_files(file_name);
 
+    CREATE TABLE IF NOT EXISTS candidate_auth_files (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      file_name TEXT NOT NULL,
+      email TEXT,
+      provider TEXT,
+      available INTEGER NOT NULL DEFAULT 1,
+      status TEXT,
+      status_message TEXT,
+      raw_json TEXT NOT NULL,
+      quota_raw_json TEXT,
+      usage_5h_percent REAL,
+      usage_week_percent REAL,
+      last_quota_refreshed_at TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS candidate_auth_files_file_unique
+      ON candidate_auth_files(file_name);
+    CREATE INDEX IF NOT EXISTS candidate_auth_files_email_idx
+      ON candidate_auth_files(email);
+    CREATE INDEX IF NOT EXISTS candidate_auth_files_updated_at_idx
+      ON candidate_auth_files(updated_at);
+
     CREATE TABLE IF NOT EXISTS quota_snapshots (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       cpa_instance_id INTEGER NOT NULL REFERENCES cpa_instances(id) ON DELETE CASCADE,
@@ -190,6 +213,11 @@ export function migrate() {
         AND json_valid(raw_json)
         AND json_type(raw_json, '$.proxy_url') = 'text'
         AND TRIM(json_extract(raw_json, '$.proxy_url')) != '';
+    UPDATE candidate_auth_files
+      SET status = NULL,
+          status_message = NULL
+      WHERE status = '已刷新RT'
+        OR status_message IN ('Refresh Token 已轮换', 'Refresh Token 未轮换');
   `);
 
   sqlite.exec(`

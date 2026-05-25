@@ -230,6 +230,41 @@ The quota refresh path is configurable per CPA instance. The default path is
 `/v0/management/auth-files`. CPA Nexus normalizes common quota payload shapes and
 matches quota rows back to local auth files by email or file name.
 
+## OpenAPI
+
+CPA Nexus exposes an admin OpenAPI endpoint for adding accounts to the local
+candidate pool:
+
+```http
+POST /api/openapi/candidate-auth-files
+Authorization: Bearer <admin_password>
+```
+
+JSON array upload, where each item is a CPA JSON or sub2api OpenAI OAuth JSON:
+
+```bash
+curl -X POST https://nexus.example.com/api/openapi/candidate-auth-files \
+  -H "Authorization: Bearer $CPA_NEXUS_ADMIN_PASSWORD" \
+  -H "Content-Type: application/json" \
+  --data '[
+    {
+      "type": "codex",
+      "email": "name@example.com",
+      "refresh_token": "rt_xxx",
+      "expired": "1970-01-01T00:00:00Z"
+    }
+  ]'
+```
+
+Multipart batch file upload:
+
+```bash
+curl -X POST https://nexus.example.com/api/openapi/candidate-auth-files \
+  -H "Authorization: Bearer $CPA_NEXUS_ADMIN_PASSWORD" \
+  -F "files=@./codex-a.json" \
+  -F "files=@./codex-b.json"
+```
+
 ## Scripts
 
 ```bash

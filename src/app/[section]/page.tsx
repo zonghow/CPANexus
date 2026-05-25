@@ -9,6 +9,7 @@ const sections = new Set<SectionId>([
   "dashboard",
   "instances",
   "auth",
+  "candidate-pool",
   "exceptions",
   "proxies",
   "message-push",

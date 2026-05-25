@@ -266,4 +266,94 @@ describe("migrate", () => {
       expect.arrayContaining(["exception_auth_files_file_unique"]),
     );
   });
+
+  it("creates candidate auth file storage", async () => {
+    const { migrate } = await import("./migrate");
+    const { getSqlite } = await import("./client");
+
+    migrate();
+    const sqlite = getSqlite();
+
+    const columns = sqlite
+      .prepare("PRAGMA table_info(candidate_auth_files)")
+      .all() as Array<{ name: string; notnull: number }>;
+    expect(columns.map((column) => column.name)).toEqual([
+      "id",
+      "file_name",
+      "email",
+      "provider",
+      "available",
+      "status",
+      "status_message",
+      "raw_json",
+      "quota_raw_json",
+      "usage_5h_percent",
+      "usage_week_percent",
+      "last_quota_refreshed_at",
+      "created_at",
+      "updated_at",
+    ]);
+    expect(columns.find((column) => column.name === "raw_json")?.notnull).toBe(1);
+
+    const indexes = sqlite
+      .prepare("PRAGMA index_list(candidate_auth_files)")
+      .all() as Array<{ name: string }>;
+    expect(indexes.map((index) => index.name)).toEqual(
+      expect.arrayContaining([
+        "candidate_auth_files_file_unique",
+        "candidate_auth_files_email_idx",
+        "candidate_auth_files_updated_at_idx",
+      ]),
+    );
+  });
+
+  it("cleans candidate RT refresh success status from existing databases", async () => {
+    const { migrate } = await import("./migrate");
+    const { getSqlite } = await import("./client");
+
+    migrate();
+    const sqlite = getSqlite();
+    sqlite
+      .prepare(`
+        INSERT INTO candidate_auth_files (
+          file_name,
+          email,
+          status,
+          status_message,
+          raw_json
+        )
+        VALUES
+          (
+            'success.json',
+            'success@example.com',
+            '已刷新RT',
+            'Refresh Token 已轮换',
+            '{"type":"codex","email":"success@example.com"}'
+          ),
+          (
+            'failed.json',
+            'failed@example.com',
+            '刷新RT失败',
+            'OpenAI token refresh failed',
+            '{"type":"codex","email":"failed@example.com"}'
+          )
+      `)
+      .run();
+
+    migrate();
+
+    expect(
+      sqlite
+        .prepare("SELECT status, status_message FROM candidate_auth_files WHERE file_name = 'success.json'")
+        .get(),
+    ).toEqual({ status: null, status_message: null });
+    expect(
+      sqlite
+        .prepare("SELECT status, status_message FROM candidate_auth_files WHERE file_name = 'failed.json'")
+        .get(),
+    ).toEqual({
+      status: "刷新RT失败",
+      status_message: "OpenAI token refresh failed",
+    });
+  });
 });

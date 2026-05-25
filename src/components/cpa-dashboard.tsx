@@ -9,6 +9,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Copy,
+  Database,
   Download,
   ExternalLink,
   FileKey2,
@@ -40,12 +41,7 @@ import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
@@ -70,11 +66,18 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { DataBoardSection } from "@/components/data-board-section";
 import { MessagePushSection } from "@/components/message-push-section";
-import { resolveAccountQuotaStatus, type AccountQuotaState } from "@/lib/account-quota-status";
+import {
+  resolveAccountQuotaStatus,
+  type AccountQuotaState,
+} from "@/lib/account-quota-status";
 import { selectAvailableAuthFileIds } from "@/lib/auth-exchange-selection";
 import { sortAccountRows } from "@/lib/account-sort";
+import { buildAutoAuthFileName } from "@/lib/codex-auth";
 import { onlyEnabledCpaGroups } from "@/lib/cpa-groups";
-import { cpaTableUpdatingIdsForJob, jobFinishedAtOrAfter } from "@/lib/cpa-sync-targets";
+import {
+  cpaTableUpdatingIdsForJob,
+  jobFinishedAtOrAfter,
+} from "@/lib/cpa-sync-targets";
 import { getFloatingMenuPosition } from "@/lib/floating-menu";
 import {
   cronToSimpleSchedule,
@@ -84,7 +87,10 @@ import {
   type CronSimpleSchedule,
 } from "@/lib/cron-presets";
 import { averageRemainingPercent } from "@/lib/quota-summary";
-import { defaultRtLoginProxyMode, type RtLoginProxyMode } from "@/lib/rt-login-ui";
+import {
+  defaultRtLoginProxyMode,
+  type RtLoginProxyMode,
+} from "@/lib/rt-login-ui";
 import { isFreeSubscriptionType } from "@/lib/subscription";
 import { cn } from "@/lib/utils";
 
@@ -141,6 +147,26 @@ type QuotaSnapshot = {
   exception: string | null;
   rawJson: string | null;
   capturedAt: string;
+};
+
+type CandidateAuthFile = {
+  id: number;
+  fileName: string;
+  email: string | null;
+  provider: string | null;
+  available: boolean;
+  status: string | null;
+  statusMessage: string | null;
+  rawJson: string;
+  quotaRawJson: string | null;
+  usage5hPercent: number | null;
+  usageWeekPercent: number | null;
+  usage5hResetAt: string | null;
+  usageWeekResetAt: string | null;
+  subscriptionType: string | null;
+  lastQuotaRefreshedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
 };
 
 type ProxyRow = {
@@ -257,9 +283,16 @@ type CpaJsonUploadResult = {
 };
 
 type CpaJsonUploadSource = "session-json";
+type CandidateQuotaRefreshMode = "withRt" | "withoutRt";
 
 const navItems = [
   { id: "auth", label: "账号管理", icon: FileKey2, href: "/auth" },
+  {
+    id: "candidate-pool",
+    label: "候补号池",
+    icon: Database,
+    href: "/candidate-pool",
+  },
   { id: "exceptions", label: "异常账号", icon: ArchiveX, href: "/exceptions" },
   { id: "dashboard", label: "数据看板", icon: BarChart3, href: "/dashboard" },
   { id: "instances", label: "CPA管理", icon: Server, href: "/instances" },
@@ -327,53 +360,84 @@ const scheduledSyncPollIntervalMs = 2000;
 const scheduledSyncTimeoutMs = 10 * 60 * 1000;
 const authExchangeQuickSelectCounts = [10, 20, 50, 100] as const;
 
-export function CpaDashboard({ section = "instances" }: { section?: SectionId }) {
+export function CpaDashboard({
+  section = "instances",
+}: {
+  section?: SectionId;
+}) {
   const activeSection = section;
   const [instances, setInstances] = useState<CpaInstance[]>([]);
-  const [authGroups, setAuthGroups] = useState<Array<{ instance: CpaInstance; authFiles: AuthFile[] }>>([]);
-  const [exceptionAuthFiles, setExceptionAuthFiles] = useState<ExceptionAuthFile[]>([]);
-  const [quotaGroups, setQuotaGroups] = useState<Array<{ instance: CpaInstance; quotas: QuotaSnapshot[] }>>([]);
+  const [authGroups, setAuthGroups] = useState<
+    Array<{ instance: CpaInstance; authFiles: AuthFile[] }>
+  >([]);
+  const [candidateAuthFiles, setCandidateAuthFiles] = useState<
+    CandidateAuthFile[]
+  >([]);
+  const [exceptionAuthFiles, setExceptionAuthFiles] = useState<
+    ExceptionAuthFile[]
+  >([]);
+  const [quotaGroups, setQuotaGroups] = useState<
+    Array<{ instance: CpaInstance; quotas: QuotaSnapshot[] }>
+  >([]);
   const [proxies, setProxies] = useState<ProxyRow[]>([]);
   const [jobs, setJobs] = useState<CronJob[]>([]);
   const [runs, setRuns] = useState<JobRun[]>([]);
-  const [runsPagination, setRunsPagination] = useState<JobRunsPagination>(defaultJobRunsPagination);
+  const [runsPagination, setRunsPagination] = useState<JobRunsPagination>(
+    defaultJobRunsPagination,
+  );
   const runsPaginationRef = useRef<JobRunsPagination>(defaultJobRunsPagination);
   const scheduledSyncRunRef = useRef<string | null>(null);
   const remoteSyncRunningRef = useRef(false);
   const remoteCpaSyncingIdsRef = useRef<Set<number>>(new Set());
-  const [updatingCpaIds, setUpdatingCpaIds] = useState<Set<number>>(() => new Set());
-  const [remoteUpdatingCpaIds, setRemoteUpdatingCpaIds] = useState<Set<number>>(() => new Set());
-  const [runningJobKeys, setRunningJobKeys] = useState<Set<string>>(() => new Set());
-  const [proxyChecks, setProxyChecks] = useState<Record<number, ProxyCheckResult>>({});
+  const [updatingCpaIds, setUpdatingCpaIds] = useState<Set<number>>(
+    () => new Set(),
+  );
+  const [remoteUpdatingCpaIds, setRemoteUpdatingCpaIds] = useState<Set<number>>(
+    () => new Set(),
+  );
+  const [runningJobKeys, setRunningJobKeys] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [proxyChecks, setProxyChecks] = useState<
+    Record<number, ProxyCheckResult>
+  >({});
   const [checkingProxies, setCheckingProxies] = useState(false);
+  const [refreshingCandidatePool, setRefreshingCandidatePool] =
+    useState<CandidateQuotaRefreshMode | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [dataRefreshVersion, setDataRefreshVersion] = useState(0);
   const [instanceForm, setInstanceForm] = useState(emptyInstance);
-  const [editingInstanceId, setEditingInstanceId] = useState<number | null>(null);
+  const [editingInstanceId, setEditingInstanceId] = useState<number | null>(
+    null,
+  );
   const [instanceDialogOpen, setInstanceDialogOpen] = useState(false);
   const [proxyForm, setProxyForm] = useState(emptyProxy);
   const [editingProxyId, setEditingProxyId] = useState<number | null>(null);
   const [proxyDialogOpen, setProxyDialogOpen] = useState(false);
 
-  const activeLabel = navItems.find((item) => item.id === activeSection)?.label ?? "CPA Nexus";
+  const activeLabel =
+    navItems.find((item) => item.id === activeSection)?.label ?? "CPA Nexus";
 
-  const markCpaTablesUpdating = useCallback((cpaInstanceIds: number[], updating: boolean) => {
-    if (cpaInstanceIds.length === 0) {
-      return;
-    }
+  const markCpaTablesUpdating = useCallback(
+    (cpaInstanceIds: number[], updating: boolean) => {
+      if (cpaInstanceIds.length === 0) {
+        return;
+      }
 
-    setUpdatingCpaIds((current) => {
-      const next = new Set(current);
-      cpaInstanceIds.forEach((id) => {
-        if (updating) {
-          next.add(id);
-        } else {
-          next.delete(id);
-        }
+      setUpdatingCpaIds((current) => {
+        const next = new Set(current);
+        cpaInstanceIds.forEach((id) => {
+          if (updating) {
+            next.add(id);
+          } else {
+            next.delete(id);
+          }
+        });
+        return next;
       });
-      return next;
-    });
-  }, []);
+    },
+    [],
+  );
 
   const markJobRunning = useCallback((key: string, running: boolean) => {
     setRunningJobKeys((current) => {
@@ -390,52 +454,88 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
   const applyJobsResponse = useCallback((jobRes: JobsApiResponse) => {
     setJobs(jobRes.jobs);
     setRuns(jobRes.runs);
-    setRemoteUpdatingCpaIds(new Set((jobRes.cpaSyncs ?? []).map((sync) => sync.cpaInstanceId)));
-    const nextRunsPagination = jobRes.runsPagination ?? defaultJobRunsPagination;
+    setRemoteUpdatingCpaIds(
+      new Set((jobRes.cpaSyncs ?? []).map((sync) => sync.cpaInstanceId)),
+    );
+    const nextRunsPagination =
+      jobRes.runsPagination ?? defaultJobRunsPagination;
     runsPaginationRef.current = nextRunsPagination;
     setRunsPagination(nextRunsPagination);
   }, []);
 
-  const fetchJobs = useCallback(async (options: { runsPage?: number; runsPageSize?: number } = {}) => {
-    const requestedRunsPage = options.runsPage ?? runsPaginationRef.current.page;
-    const requestedRunsPageSize = options.runsPageSize ?? runsPaginationRef.current.pageSize;
-    const jobsSearchParams = new URLSearchParams({
-      runsPage: String(requestedRunsPage),
-      runsPageSize: String(requestedRunsPageSize),
-    });
-    const jobRes = await fetchJson<JobsApiResponse>(`/api/jobs?${jobsSearchParams.toString()}`);
-    applyJobsResponse(jobRes);
-    return jobRes;
-  }, [applyJobsResponse]);
-
-  const loadAll = useCallback(async (options: { runsPage?: number; runsPageSize?: number } = {}) => {
-    try {
-      const requestedRunsPage = options.runsPage ?? runsPaginationRef.current.page;
-      const requestedRunsPageSize = options.runsPageSize ?? runsPaginationRef.current.pageSize;
+  const fetchJobs = useCallback(
+    async (options: { runsPage?: number; runsPageSize?: number } = {}) => {
+      const requestedRunsPage =
+        options.runsPage ?? runsPaginationRef.current.page;
+      const requestedRunsPageSize =
+        options.runsPageSize ?? runsPaginationRef.current.pageSize;
       const jobsSearchParams = new URLSearchParams({
         runsPage: String(requestedRunsPage),
         runsPageSize: String(requestedRunsPageSize),
       });
-      const [instanceRes, authRes, exceptionRes, quotaRes, proxyRes, jobRes] =
-        await Promise.all([
-          fetchJson<{ instances: CpaInstance[] }>("/api/cpa-instances"),
-          fetchJson<{ groups: Array<{ instance: CpaInstance; authFiles: AuthFile[] }> }>("/api/auth-files"),
-          fetchJson<{ exceptionAuthFiles: ExceptionAuthFile[] }>("/api/exception-auth-files"),
-          fetchJson<{ groups: Array<{ instance: CpaInstance; quotas: QuotaSnapshot[] }> }>("/api/quotas"),
-          fetchJson<{ proxies: ProxyRow[]; instances: CpaInstance[] }>("/api/proxies"),
-          fetchJson<JobsApiResponse>(`/api/jobs?${jobsSearchParams.toString()}`),
-        ]);
-      setInstances(instanceRes.instances);
-      setAuthGroups(authRes.groups);
-      setExceptionAuthFiles(exceptionRes.exceptionAuthFiles);
-      setQuotaGroups(quotaRes.groups);
-      setProxies(proxyRes.proxies);
+      const jobRes = await fetchJson<JobsApiResponse>(
+        `/api/jobs?${jobsSearchParams.toString()}`,
+      );
       applyJobsResponse(jobRes);
-      setDataRefreshVersion((version) => version + 1);
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : String(error));
-    }
-  }, [applyJobsResponse]);
+      return jobRes;
+    },
+    [applyJobsResponse],
+  );
+
+  const loadAll = useCallback(
+    async (options: { runsPage?: number; runsPageSize?: number } = {}) => {
+      try {
+        const requestedRunsPage =
+          options.runsPage ?? runsPaginationRef.current.page;
+        const requestedRunsPageSize =
+          options.runsPageSize ?? runsPaginationRef.current.pageSize;
+        const jobsSearchParams = new URLSearchParams({
+          runsPage: String(requestedRunsPage),
+          runsPageSize: String(requestedRunsPageSize),
+        });
+        const [
+          instanceRes,
+          authRes,
+          candidateRes,
+          exceptionRes,
+          quotaRes,
+          proxyRes,
+          jobRes,
+        ] = await Promise.all([
+          fetchJson<{ instances: CpaInstance[] }>("/api/cpa-instances"),
+          fetchJson<{
+            groups: Array<{ instance: CpaInstance; authFiles: AuthFile[] }>;
+          }>("/api/auth-files"),
+          fetchJson<{ authFiles: CandidateAuthFile[] }>(
+            "/api/candidate-auth-files",
+          ),
+          fetchJson<{ exceptionAuthFiles: ExceptionAuthFile[] }>(
+            "/api/exception-auth-files",
+          ),
+          fetchJson<{
+            groups: Array<{ instance: CpaInstance; quotas: QuotaSnapshot[] }>;
+          }>("/api/quotas"),
+          fetchJson<{ proxies: ProxyRow[]; instances: CpaInstance[] }>(
+            "/api/proxies",
+          ),
+          fetchJson<JobsApiResponse>(
+            `/api/jobs?${jobsSearchParams.toString()}`,
+          ),
+        ]);
+        setInstances(instanceRes.instances);
+        setAuthGroups(authRes.groups);
+        setCandidateAuthFiles(candidateRes.authFiles);
+        setExceptionAuthFiles(exceptionRes.exceptionAuthFiles);
+        setQuotaGroups(quotaRes.groups);
+        setProxies(proxyRes.proxies);
+        applyJobsResponse(jobRes);
+        setDataRefreshVersion((version) => version + 1);
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : String(error));
+      }
+    },
+    [applyJobsResponse],
+  );
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -454,13 +554,20 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
           return;
         }
 
-        const syncRunning = Boolean(jobRes.jobs.find((job) => job.key === syncJobKey)?.running);
+        const syncRunning = Boolean(
+          jobRes.jobs.find((job) => job.key === syncJobKey)?.running,
+        );
         const wasSyncRunning = remoteSyncRunningRef.current;
-        const cpaSyncingIds = new Set((jobRes.cpaSyncs ?? []).map((sync) => sync.cpaInstanceId));
+        const cpaSyncingIds = new Set(
+          (jobRes.cpaSyncs ?? []).map((sync) => sync.cpaInstanceId),
+        );
         const hadCpaSyncing = remoteCpaSyncingIdsRef.current.size > 0;
         remoteSyncRunningRef.current = syncRunning;
         remoteCpaSyncingIdsRef.current = cpaSyncingIds;
-        if ((wasSyncRunning && !syncRunning) || (hadCpaSyncing && cpaSyncingIds.size === 0)) {
+        if (
+          (wasSyncRunning && !syncRunning) ||
+          (hadCpaSyncing && cpaSyncingIds.size === 0)
+        ) {
           await loadAll({ runsPage: 1 });
         }
       } catch {
@@ -491,50 +598,74 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
     () => secondsUntilJobRun(syncJob, nowMs),
     [syncJob, nowMs],
   );
-  const isSyncJobRunning = runningJobKeys.has(syncJobKey) || Boolean(syncJob?.running);
+  const isSyncJobRunning =
+    runningJobKeys.has(syncJobKey) || Boolean(syncJob?.running);
   const effectiveUpdatingCpaIds = useMemo(
     () => new Set([...updatingCpaIds, ...remoteUpdatingCpaIds]),
     [remoteUpdatingCpaIds, updatingCpaIds],
   );
-  const syncButtonLabel = formatSyncButtonLabel(syncJob, syncCountdownSeconds, isSyncJobRunning);
-  const syncButtonTitle = formatSyncButtonTitle(syncJob, syncCountdownSeconds, isSyncJobRunning);
+  const syncButtonLabel = formatSyncButtonLabel(
+    syncJob,
+    syncCountdownSeconds,
+    isSyncJobRunning,
+  );
+  const syncButtonTitle = formatSyncButtonTitle(
+    syncJob,
+    syncCountdownSeconds,
+    isSyncJobRunning,
+  );
 
-  const waitForScheduledSyncCompletion = useCallback(async (scheduledRunAt: string) => {
-    const deadline = Date.now() + scheduledSyncTimeoutMs;
+  const waitForScheduledSyncCompletion = useCallback(
+    async (scheduledRunAt: string) => {
+      const deadline = Date.now() + scheduledSyncTimeoutMs;
 
-    while (Date.now() < deadline) {
-      await sleep(scheduledSyncPollIntervalMs);
-      const jobRes = await fetchJobs({ runsPage: 1 });
-      const latestSyncJob = jobRes.jobs.find((job) => job.key === syncJobKey);
-      if (latestSyncJob && jobFinishedAtOrAfter(latestSyncJob, scheduledRunAt)) {
-        return true;
+      while (Date.now() < deadline) {
+        await sleep(scheduledSyncPollIntervalMs);
+        const jobRes = await fetchJobs({ runsPage: 1 });
+        const latestSyncJob = jobRes.jobs.find((job) => job.key === syncJobKey);
+        if (
+          latestSyncJob &&
+          jobFinishedAtOrAfter(latestSyncJob, scheduledRunAt)
+        ) {
+          return true;
+        }
       }
-    }
 
-    return false;
-  }, [fetchJobs]);
+      return false;
+    },
+    [fetchJobs],
+  );
 
-  const handleScheduledSyncStart = useCallback(async (scheduledRunAt: string) => {
-    if (scheduledSyncRunRef.current === scheduledRunAt) {
-      return;
-    }
+  const handleScheduledSyncStart = useCallback(
+    async (scheduledRunAt: string) => {
+      if (scheduledSyncRunRef.current === scheduledRunAt) {
+        return;
+      }
 
-    scheduledSyncRunRef.current = scheduledRunAt;
-    const updatingIds = cpaTableUpdatingIdsForJob(syncJobKey, instances);
-    markJobRunning(syncJobKey, true);
-    markCpaTablesUpdating(updatingIds, true);
+      scheduledSyncRunRef.current = scheduledRunAt;
+      const updatingIds = cpaTableUpdatingIdsForJob(syncJobKey, instances);
+      markJobRunning(syncJobKey, true);
+      markCpaTablesUpdating(updatingIds, true);
 
-    try {
-      await waitForScheduledSyncCompletion(scheduledRunAt);
-      await loadAll({ runsPage: 1 });
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : String(error));
-    } finally {
-      markCpaTablesUpdating(updatingIds, false);
-      markJobRunning(syncJobKey, false);
-      scheduledSyncRunRef.current = null;
-    }
-  }, [instances, loadAll, markCpaTablesUpdating, markJobRunning, waitForScheduledSyncCompletion]);
+      try {
+        await waitForScheduledSyncCompletion(scheduledRunAt);
+        await loadAll({ runsPage: 1 });
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : String(error));
+      } finally {
+        markCpaTablesUpdating(updatingIds, false);
+        markJobRunning(syncJobKey, false);
+        scheduledSyncRunRef.current = null;
+      }
+    },
+    [
+      instances,
+      loadAll,
+      markCpaTablesUpdating,
+      markJobRunning,
+      waitForScheduledSyncCompletion,
+    ],
+  );
 
   useEffect(() => {
     if (!syncJob?.enabled || !syncJob.nextRunAt) {
@@ -569,7 +700,13 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
     cpaInstanceIds: Array<number | null | undefined>,
     action: () => Promise<void>,
   ) {
-    const ids = [...new Set(cpaInstanceIds.filter((id): id is number => typeof id === "number" && id > 0))];
+    const ids = [
+      ...new Set(
+        cpaInstanceIds.filter(
+          (id): id is number => typeof id === "number" && id > 0,
+        ),
+      ),
+    ];
     if (ids.length > 0) {
       setUpdatingCpaIds((current) => {
         const next = new Set(current);
@@ -593,7 +730,9 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
 
   async function submitInstance(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const url = editingInstanceId ? `/api/cpa-instances/${editingInstanceId}` : "/api/cpa-instances";
+    const url = editingInstanceId
+      ? `/api/cpa-instances/${editingInstanceId}`
+      : "/api/cpa-instances";
     await mutate(url, {
       method: editingInstanceId ? "PUT" : "POST",
       body: JSON.stringify(instanceForm),
@@ -607,7 +746,9 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
 
   async function submitProxy(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const url = editingProxyId ? `/api/proxies/${editingProxyId}` : "/api/proxies";
+    const url = editingProxyId
+      ? `/api/proxies/${editingProxyId}`
+      : "/api/proxies";
     await mutate(url, {
       method: editingProxyId ? "PUT" : "POST",
       body: JSON.stringify(proxyForm),
@@ -638,12 +779,19 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
   async function checkAllProxies() {
     setCheckingProxies(true);
     try {
-      const result = await mutate<{ results: ProxyCheckResult[] }>("/api/proxies/check", {
-        method: "POST",
-      });
-      setProxyChecks(Object.fromEntries(result.results.map((item) => [item.proxyId, item])));
+      const result = await mutate<{ results: ProxyCheckResult[] }>(
+        "/api/proxies/check",
+        {
+          method: "POST",
+        },
+      );
+      setProxyChecks(
+        Object.fromEntries(result.results.map((item) => [item.proxyId, item])),
+      );
       const availableCount = result.results.filter((item) => item.ok).length;
-      toast.success(`代理检测完成：${availableCount}/${result.results.length} 可用`);
+      toast.success(
+        `代理检测完成：${availableCount}/${result.results.length} 可用`,
+      );
     } catch (error) {
       toast.error(error instanceof Error ? error.message : String(error));
     } finally {
@@ -660,14 +808,18 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
     });
     try {
       await withUpdatingCpaTables(updatingIds, async () => {
-        const result = await mutate<{ status: string; message: string }>(`/api/jobs/${encodeURIComponent(key)}/run`, {
-          method: "POST",
-        });
+        const result = await mutate<{ status: string; message: string }>(
+          `/api/jobs/${encodeURIComponent(key)}/run`,
+          {
+            method: "POST",
+          },
+        );
         toast.success(result.message);
         await loadAll({ runsPage: 1 });
       });
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
+      const errorMessage =
+        error instanceof Error ? error.message : String(error);
       toast.error(errorMessage);
       await fetchJobs({ runsPage: 1 });
     } finally {
@@ -715,14 +867,17 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
   async function moveAuthFile(id: number, targetCpaInstanceId: number) {
     const sourceCpaInstanceId = findAuthFileCpaInstanceId(id);
     try {
-      await withUpdatingCpaTables([sourceCpaInstanceId, targetCpaInstanceId], async () => {
-        await mutate(`/api/auth-files/${id}`, {
-          method: "PATCH",
-          body: JSON.stringify({ targetCpaInstanceId }),
-        });
-        toast.success("账号已移动");
-        await loadAll();
-      });
+      await withUpdatingCpaTables(
+        [sourceCpaInstanceId, targetCpaInstanceId],
+        async () => {
+          await mutate(`/api/auth-files/${id}`, {
+            method: "PATCH",
+            body: JSON.stringify({ targetCpaInstanceId }),
+          });
+          toast.success("账号已移动");
+          await loadAll();
+        },
+      );
     } catch (error) {
       toast.error(error instanceof Error ? error.message : String(error));
     }
@@ -764,13 +919,14 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
     const sourceCpaInstanceId = findAuthFileCpaInstanceId(id);
     try {
       await withUpdatingCpaTables([sourceCpaInstanceId], async () => {
-        const result = await mutate<{ status: string; message: string; instance: string }>(
-          `/api/auth-files/${id}`,
-          {
-            method: "POST",
-            body: JSON.stringify({ action: "refreshQuota" }),
-          },
-        );
+        const result = await mutate<{
+          status: string;
+          message: string;
+          instance: string;
+        }>(`/api/auth-files/${id}`, {
+          method: "POST",
+          body: JSON.stringify({ action: "refreshQuota" }),
+        });
         if (result.status === "success") {
           toast.success(`${result.instance}：${result.message}`);
         } else {
@@ -841,6 +997,144 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
     return result;
   }
 
+  async function uploadCandidateJsonFiles(files: CpaJsonUploadFile[]) {
+    const result = await mutate<CpaJsonUploadResult>(
+      "/api/candidate-auth-files",
+      {
+        method: "POST",
+        body: JSON.stringify({ files }),
+      },
+    );
+    await loadAll();
+    return result;
+  }
+
+  async function refreshCandidatePoolQuotas(refreshToken: boolean) {
+    setRefreshingCandidatePool(refreshToken ? "withRt" : "withoutRt");
+    try {
+      const result = await mutate<{ refreshed: number; failed: number }>(
+        "/api/candidate-auth-files/refresh-quotas",
+        {
+          method: "POST",
+          body: JSON.stringify({ refreshToken }),
+        },
+      );
+      if (result.failed > 0) {
+        toast.warning(
+          `候补号池配额已刷新：${result.refreshed} 个成功，${result.failed} 个异常`,
+        );
+      } else {
+        toast.success(`候补号池配额已刷新 ${result.refreshed} 个`);
+      }
+      await loadAll();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error));
+    } finally {
+      setRefreshingCandidatePool(null);
+    }
+  }
+
+  async function exportCandidateJsonFiles(
+    authFileIds: number[],
+    deleteAfterExport: boolean,
+  ) {
+    if (authFileIds.length === 0) {
+      throw new Error("请先选择候补账号");
+    }
+
+    const response = await fetch("/api/candidate-auth-files/batch", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        action: deleteAfterExport ? "exportAndDelete" : "export",
+        authFileIds,
+      }),
+    });
+    if (!response.ok) {
+      throw new Error(await readFetchError(response));
+    }
+
+    const blob = await response.blob();
+    downloadBlob(
+      blob,
+      fileNameFromContentDisposition(response.headers.get("content-disposition")) ??
+        `candidate-auths-${formatDownloadTimestamp(new Date())}.zip`,
+    );
+    if (deleteAfterExport) {
+      await loadAll();
+    }
+  }
+
+  async function moveCandidateJsonFiles(
+    authFileIds: number[],
+    targetCpaInstanceId: number,
+  ) {
+    if (authFileIds.length === 0) {
+      throw new Error("请先选择候补账号");
+    }
+
+    const result = await mutate<{ processed: number; action: "move" }>(
+      "/api/candidate-auth-files/batch",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          action: "move",
+          authFileIds,
+          targetCpaInstanceId,
+        }),
+      },
+    );
+    toast.success(`已移动 ${result.processed} 个候补账号`);
+    await loadAll();
+  }
+
+  async function refreshCandidateJsonFileTokens(authFileIds: number[]) {
+    if (authFileIds.length === 0) {
+      throw new Error("请先选择候补账号");
+    }
+
+    const result = await mutate<{
+      processed: number;
+      failed: number;
+      rotated: number;
+      action: "refreshToken";
+    }>("/api/candidate-auth-files/batch", {
+      method: "POST",
+      body: JSON.stringify({
+        action: "refreshToken",
+        authFileIds,
+      }),
+    });
+    await loadAll();
+    return result;
+  }
+
+  async function refreshCandidateSelectedQuotas(
+    authFileIds: number[],
+    refreshToken: boolean,
+  ) {
+    if (authFileIds.length === 0) {
+      throw new Error("请先选择候补账号");
+    }
+
+    const result = await mutate<{
+      processed: number;
+      failed: number;
+      action: "refreshQuota";
+    }>("/api/candidate-auth-files/batch", {
+      method: "POST",
+      body: JSON.stringify({
+        action: "refreshQuota",
+        authFileIds,
+        refreshToken,
+      }),
+    });
+    await loadAll();
+    return result;
+  }
+
   async function portalExceptionAuthFile(id: number) {
     const sourceCpaInstanceId = findAuthFileCpaInstanceId(id);
     try {
@@ -869,7 +1163,10 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
 
   async function clearExceptionAuthFiles() {
     try {
-      const result = await mutate<{ deleted: number }>("/api/exception-auth-files", { method: "DELETE" });
+      const result = await mutate<{ deleted: number }>(
+        "/api/exception-auth-files",
+        { method: "DELETE" },
+      );
       toast.success(`已清空 ${result.deleted} 个异常账号`);
       await loadAll();
     } catch (error) {
@@ -877,7 +1174,10 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
     }
   }
 
-  async function moveExceptionAuthFile(id: number, targetCpaInstanceId: number) {
+  async function moveExceptionAuthFile(
+    id: number,
+    targetCpaInstanceId: number,
+  ) {
     try {
       await withUpdatingCpaTables([targetCpaInstanceId], async () => {
         await mutate(`/api/exception-auth-files/${id}`, {
@@ -919,17 +1219,15 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
 
     try {
       await withUpdatingCpaTables([cpaInstanceId], async () => {
-        const result = await mutate<{ processed: number; action: BatchExceptionAction }>(
-          `/api/cpa-instances/${cpaInstanceId}/auth-files/batch`,
-          {
-            method: "POST",
-            body: JSON.stringify(
-              target === "free"
-                ? { action, target }
-                : { action, authFileIds },
-            ),
-          },
-        );
+        const result = await mutate<{
+          processed: number;
+          action: BatchExceptionAction;
+        }>(`/api/cpa-instances/${cpaInstanceId}/auth-files/batch`, {
+          method: "POST",
+          body: JSON.stringify(
+            target === "free" ? { action, target } : { action, authFileIds },
+          ),
+        });
         toast.success(`${successVerb} ${result.processed} 个${subject}`);
         await loadAll();
       });
@@ -938,19 +1236,25 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
     }
   }
 
-  async function downloadAuthFiles(cpaInstanceId: number, authFileIds: number[]) {
+  async function downloadAuthFiles(
+    cpaInstanceId: number,
+    authFileIds: number[],
+  ) {
     if (authFileIds.length === 0) {
       throw new Error("请先选择账号");
     }
 
     await withUpdatingCpaTables([cpaInstanceId], async () => {
-      const response = await fetch(`/api/cpa-instances/${cpaInstanceId}/auth-files/batch`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
+      const response = await fetch(
+        `/api/cpa-instances/${cpaInstanceId}/auth-files/batch`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ action: "download", authFileIds }),
         },
-        body: JSON.stringify({ action: "download", authFileIds }),
-      });
+      );
       if (!response.ok) {
         throw new Error(await readFetchError(response));
       }
@@ -958,8 +1262,9 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
       const blob = await response.blob();
       downloadBlob(
         blob,
-        fileNameFromContentDisposition(response.headers.get("content-disposition")) ??
-          `auths-${formatDownloadTimestamp(new Date())}.zip`,
+        fileNameFromContentDisposition(
+          response.headers.get("content-disposition"),
+        ) ?? `auths-${formatDownloadTimestamp(new Date())}.zip`,
       );
       toast.success(`已取号 ${authFileIds.length} 个`);
       await loadAll();
@@ -975,35 +1280,41 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
       throw new Error("请先选择账号");
     }
 
-    await withUpdatingCpaTables([cpaInstanceId, targetCpaInstanceId], async () => {
-      const result = await mutate<{ processed: number; action: "move" }>(
-        `/api/cpa-instances/${cpaInstanceId}/auth-files/batch`,
-        {
-          method: "POST",
-          body: JSON.stringify({
-            action: "move",
-            authFileIds,
-            targetCpaInstanceId,
-          }),
-        },
-      );
-      toast.success(`已移动 ${result.processed} 个账号`);
-      await loadAll();
-    });
+    await withUpdatingCpaTables(
+      [cpaInstanceId, targetCpaInstanceId],
+      async () => {
+        const result = await mutate<{ processed: number; action: "move" }>(
+          `/api/cpa-instances/${cpaInstanceId}/auth-files/batch`,
+          {
+            method: "POST",
+            body: JSON.stringify({
+              action: "move",
+              authFileIds,
+              targetCpaInstanceId,
+            }),
+          },
+        );
+        toast.success(`已移动 ${result.processed} 个账号`);
+        await loadAll();
+      },
+    );
   }
 
   async function autoAssignCpaProxies(cpaInstanceId: number) {
     try {
       await withUpdatingCpaTables([cpaInstanceId], async () => {
-        const result = await mutate<{ processed: number; skipped?: number; action: "autoAssignProxy" }>(
-          `/api/cpa-instances/${cpaInstanceId}/auth-files/batch`,
-          {
-            method: "POST",
-            body: JSON.stringify({ action: "autoAssignProxy" }),
-          },
-        );
+        const result = await mutate<{
+          processed: number;
+          skipped?: number;
+          action: "autoAssignProxy";
+        }>(`/api/cpa-instances/${cpaInstanceId}/auth-files/batch`, {
+          method: "POST",
+          body: JSON.stringify({ action: "autoAssignProxy" }),
+        });
         if (result.processed > 0 && result.skipped) {
-          toast.success(`已自动分配代理 ${result.processed} 个，${result.skipped} 个因容量不足跳过`);
+          toast.success(
+            `已自动分配代理 ${result.processed} 个，${result.skipped} 个因容量不足跳过`,
+          );
         } else if (result.processed > 0) {
           toast.success(`已自动分配代理 ${result.processed} 个`);
         } else if (result.skipped) {
@@ -1021,10 +1332,11 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
   async function refreshCpaInstance(cpaInstanceId: number) {
     try {
       await withUpdatingCpaTables([cpaInstanceId], async () => {
-        const result = await mutate<{ status: string; message: string; instance: string }>(
-          `/api/cpa-instances/${cpaInstanceId}/sync`,
-          { method: "POST" },
-        );
+        const result = await mutate<{
+          status: string;
+          message: string;
+          instance: string;
+        }>(`/api/cpa-instances/${cpaInstanceId}/sync`, { method: "POST" });
         toast.success(`${result.instance}：${result.message}`);
         await loadAll();
       });
@@ -1070,7 +1382,9 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
               <div className="flex h-7 w-7 items-center justify-center rounded-md bg-primary text-primary-foreground">
                 <Network className="h-3.5 w-3.5" />
               </div>
-              <div className="truncate text-[13px] font-semibold">CPA Nexus</div>
+              <div className="truncate text-[13px] font-semibold">
+                CPA Nexus
+              </div>
             </div>
             <nav className="flex gap-1 overflow-x-auto p-1 lg:flex-col lg:overflow-visible">
               {navItems.map((item) => {
@@ -1101,7 +1415,11 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
               <h1 className="text-xl font-semibold">{activeLabel}</h1>
             </div>
             <div className="flex flex-wrap items-center gap-2">
-              <Button size="sm" title={syncButtonTitle} onClick={() => void runJob(syncJobKey)}>
+              <Button
+                size="sm"
+                title={syncButtonTitle}
+                onClick={() => void runJob(syncJobKey)}
+              >
                 <RefreshCw className="h-4 w-4" />
                 {syncButtonLabel}
               </Button>
@@ -1135,7 +1453,9 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
                 onSubmit={submitInstance}
                 onToggleEnabled={toggleInstanceEnabled}
                 onDelete={async (id) => {
-                  await mutate(`/api/cpa-instances/${id}`, { method: "DELETE" });
+                  await mutate(`/api/cpa-instances/${id}`, {
+                    method: "DELETE",
+                  });
                   await loadAll();
                 }}
               />
@@ -1164,6 +1484,22 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
                 onRefreshCpa={refreshCpaInstance}
                 onStartCodexOAuth={startCodexOAuthLogin}
                 onSubmitCodexOAuthCallback={submitCodexOAuthCallback}
+              />
+            ) : null}
+
+            {activeSection === "candidate-pool" ? (
+              <CandidatePoolSection
+                rows={candidateAuthFiles}
+                instances={instances.filter((instance) => instance.enabled)}
+                nowMs={nowMs}
+                refreshing={refreshingCandidatePool !== null}
+                refreshingMode={refreshingCandidatePool}
+                onUploadJsonFiles={uploadCandidateJsonFiles}
+                onRefreshQuotas={refreshCandidatePoolQuotas}
+                onExportJsonFiles={exportCandidateJsonFiles}
+                onMoveToCpa={moveCandidateJsonFiles}
+                onRefreshTokens={refreshCandidateJsonFileTokens}
+                onRefreshSelectedQuotas={refreshCandidateSelectedQuotas}
               />
             ) : null}
 
@@ -1207,9 +1543,7 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
               />
             ) : null}
 
-            {activeSection === "message-push" ? (
-              <MessagePushSection />
-            ) : null}
+            {activeSection === "message-push" ? <MessagePushSection /> : null}
 
             {activeSection === "jobs" ? (
               <JobsSection
@@ -1221,14 +1555,16 @@ export function CpaDashboard({ section = "instances" }: { section?: SectionId })
                 onSave={async (job) => {
                   await mutate(`/api/jobs/${encodeURIComponent(job.key)}`, {
                     method: "PUT",
-                    body: JSON.stringify({ cron: job.cron, enabled: job.enabled }),
+                    body: JSON.stringify({
+                      cron: job.cron,
+                      enabled: job.enabled,
+                    }),
                   });
                   toast.success("定时任务已保存");
                   await loadAll();
                 }}
               />
             ) : null}
-
           </div>
         </main>
       </div>
@@ -1292,7 +1628,9 @@ function InstancesSection(props: {
       <div className="flex flex-col gap-2.5 rounded-md border bg-card p-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <div className="font-medium">CPA 实例</div>
-          <div className="text-sm text-muted-foreground">集中管理 CPA 地址、管理密码和配额刷新配置。</div>
+          <div className="text-sm text-muted-foreground">
+            集中管理 CPA 地址、管理密码和配额刷新配置。
+          </div>
         </div>
         <Button
           type="button"
@@ -1310,27 +1648,64 @@ function InstancesSection(props: {
       <Dialog open={props.open} onOpenChange={props.setOpen}>
         <DialogContent className="sm:max-w-xl">
           <DialogHeader>
-            <DialogTitle>{props.editingId ? "编辑CPA实例" : "添加CPA实例"}</DialogTitle>
+            <DialogTitle>
+              {props.editingId ? "编辑CPA实例" : "添加CPA实例"}
+            </DialogTitle>
             <DialogDescription>
-              配置 CPA 管理地址、密码和配额刷新方式，保存后会出现在 CPA 管理列表中。
+              配置 CPA 管理地址、密码和配额刷新方式，保存后会出现在 CPA
+              管理列表中。
             </DialogDescription>
           </DialogHeader>
 
           <form id={formId} onSubmit={props.onSubmit} className="grid gap-4">
             <Field label="名称">
-              <Input value={props.form.name} onChange={(event) => props.setForm({ ...props.form, name: event.target.value })} required />
+              <Input
+                value={props.form.name}
+                onChange={(event) =>
+                  props.setForm({ ...props.form, name: event.target.value })
+                }
+                required
+              />
             </Field>
             <Field label="CPA地址">
-              <Input value={props.form.baseUrl} onChange={(event) => props.setForm({ ...props.form, baseUrl: event.target.value })} placeholder="http://127.0.0.1:8317" required />
+              <Input
+                value={props.form.baseUrl}
+                onChange={(event) =>
+                  props.setForm({ ...props.form, baseUrl: event.target.value })
+                }
+                placeholder="http://127.0.0.1:8317"
+                required
+              />
             </Field>
             <Field label="CPA密码">
-              <Input type="password" value={props.form.password} onChange={(event) => props.setForm({ ...props.form, password: event.target.value })} required />
+              <Input
+                type="password"
+                value={props.form.password}
+                onChange={(event) =>
+                  props.setForm({ ...props.form, password: event.target.value })
+                }
+                required
+              />
             </Field>
             <Field label="配额刷新路径">
-              <Input value={props.form.quotaRefreshPath} onChange={(event) => props.setForm({ ...props.form, quotaRefreshPath: event.target.value })} required />
+              <Input
+                value={props.form.quotaRefreshPath}
+                onChange={(event) =>
+                  props.setForm({
+                    ...props.form,
+                    quotaRefreshPath: event.target.value,
+                  })
+                }
+                required
+              />
             </Field>
             <label className="flex items-center gap-2 text-sm">
-              <Switch checked={props.form.enabled} onCheckedChange={(enabled) => props.setForm({ ...props.form, enabled })} />
+              <Switch
+                checked={props.form.enabled}
+                onCheckedChange={(enabled) =>
+                  props.setForm({ ...props.form, enabled })
+                }
+              />
               启用
             </label>
           </form>
@@ -1354,7 +1729,9 @@ function InstancesSection(props: {
       <DataTable
         headers={["名称", "地址", "启用", "状态", "最近同步", "错误", "操作"]}
         rows={props.instances.map((instance) => [
-          <div key="name" className="font-medium">{instance.name}</div>,
+          <div key="name" className="font-medium">
+            {instance.name}
+          </div>,
           <a
             key="url"
             href={buildCpaManagementHref(instance.baseUrl)}
@@ -1368,11 +1745,21 @@ function InstancesSection(props: {
             key="enabled"
             checked={instance.enabled}
             aria-label={`${instance.name} 启用状态`}
-            onCheckedChange={(enabled) => void props.onToggleEnabled(instance.id, enabled)}
+            onCheckedChange={(enabled) =>
+              void props.onToggleEnabled(instance.id, enabled)
+            }
           />,
-          <StatusBadge key="status" ok={instance.enabled && instance.lastSyncStatus !== "error"} label={instance.enabled ? instance.lastSyncStatus ?? "启用" : "停用"} />,
+          <StatusBadge
+            key="status"
+            ok={instance.enabled && instance.lastSyncStatus !== "error"}
+            label={
+              instance.enabled ? (instance.lastSyncStatus ?? "启用") : "停用"
+            }
+          />,
           <span key="sync">{formatDate(instance.lastSyncedAt)}</span>,
-          <span key="error" className="max-w-[280px] truncate text-rose-700">{instance.lastSyncError ?? "-"}</span>,
+          <span key="error" className="max-w-[280px] truncate text-rose-700">
+            {instance.lastSyncError ?? "-"}
+          </span>,
           <div key="actions" className="flex gap-2">
             <Button
               size="sm"
@@ -1391,7 +1778,11 @@ function InstancesSection(props: {
             >
               编辑
             </Button>
-            <Button size="icon" variant="ghost" onClick={() => void props.onDelete(instance.id)}>
+            <Button
+              size="icon"
+              variant="ghost"
+              onClick={() => void props.onDelete(instance.id)}
+            >
               <Trash2 className="h-4 w-4" />
             </Button>
           </div>,
@@ -1465,7 +1856,10 @@ function AuthFilesSection({
   onPortalExceptionAuthFile: (id: number) => Promise<void>;
   onMoveAuthFile: (id: number, targetCpaInstanceId: number) => Promise<void>;
   onToggleAuthFileDisabled: (id: number, disabled: boolean) => Promise<void>;
-  onConfigureAuthFileProxy: (id: number, proxyUrl: string | null) => Promise<void>;
+  onConfigureAuthFileProxy: (
+    id: number,
+    proxyUrl: string | null,
+  ) => Promise<void>;
   onRefreshAuthFileQuota: (id: number) => Promise<void>;
   onRtLoginAccount: (
     cpaInstanceId: number,
@@ -1491,7 +1885,10 @@ function AuthFilesSection({
     subject: string,
     target?: BatchAuthFileTarget,
   ) => Promise<void>;
-  onDownloadAuthFiles: (cpaInstanceId: number, authFileIds: number[]) => Promise<void>;
+  onDownloadAuthFiles: (
+    cpaInstanceId: number,
+    authFileIds: number[],
+  ) => Promise<void>;
   onMoveAuthFiles: (
     cpaInstanceId: number,
     authFileIds: number[],
@@ -1500,7 +1897,10 @@ function AuthFilesSection({
   onAutoAssignCpaProxies: (cpaInstanceId: number) => Promise<void>;
   onRefreshCpa: (cpaInstanceId: number) => Promise<void>;
   onStartCodexOAuth: (cpaInstanceId: number) => Promise<CodexOAuthStartResult>;
-  onSubmitCodexOAuthCallback: (cpaInstanceId: number, redirectUrl: string) => Promise<void>;
+  onSubmitCodexOAuthCallback: (
+    cpaInstanceId: number,
+    redirectUrl: string,
+  ) => Promise<void>;
 }) {
   const enabledGroups = onlyEnabledCpaGroups(groups);
   const enabledInstances = enabledGroups.map((group) => group.instance);
@@ -1512,14 +1912,20 @@ function AuthFilesSection({
     () => proxies.filter((proxy) => proxy.enabled),
     [proxies],
   );
-  const [deleteTarget, setDeleteTarget] = useState<AuthFileQuotaRow | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<AuthFileQuotaRow | null>(
+    null,
+  );
   const [moveTarget, setMoveTarget] = useState<AuthFileQuotaRow | null>(null);
   const [moveTargetInstanceId, setMoveTargetInstanceId] = useState("");
   const [proxyTarget, setProxyTarget] = useState<AuthFileQuotaRow | null>(null);
   const [proxyTargetUrl, setProxyTargetUrl] = useState("");
-  const [openLoginMenuInstanceId, setOpenLoginMenuInstanceId] = useState<number | null>(null);
+  const [openLoginMenuInstanceId, setOpenLoginMenuInstanceId] = useState<
+    number | null
+  >(null);
   const [rtLogin, setRtLogin] = useState<RtLoginDialogState | null>(null);
-  const [sessionJson, setSessionJson] = useState<SessionJsonDialogState | null>(null);
+  const [sessionJson, setSessionJson] = useState<SessionJsonDialogState | null>(
+    null,
+  );
   const [oauthLogin, setOauthLogin] = useState<{
     instance: CpaInstance;
     authUrl: string | null;
@@ -1529,9 +1935,16 @@ function AuthFilesSection({
     submitting: boolean;
     error: string | null;
   } | null>(null);
-  const [openBulkMenuInstanceId, setOpenBulkMenuInstanceId] = useState<number | null>(null);
-  const [openExchangeMenuInstanceId, setOpenExchangeMenuInstanceId] = useState<number | null>(null);
-  const [exchangeMenuPosition, setExchangeMenuPosition] = useState({ left: 0, top: 0 });
+  const [openBulkMenuInstanceId, setOpenBulkMenuInstanceId] = useState<
+    number | null
+  >(null);
+  const [openExchangeMenuInstanceId, setOpenExchangeMenuInstanceId] = useState<
+    number | null
+  >(null);
+  const [exchangeMenuPosition, setExchangeMenuPosition] = useState({
+    left: 0,
+    top: 0,
+  });
   const [exchangeDialog, setExchangeDialog] = useState<{
     mode: AuthExchangeMode;
     instance: CpaInstance;
@@ -1573,7 +1986,8 @@ function AuthFilesSection({
     }
 
     document.addEventListener("pointerdown", closeOnOutsidePointerDown);
-    return () => document.removeEventListener("pointerdown", closeOnOutsidePointerDown);
+    return () =>
+      document.removeEventListener("pointerdown", closeOnOutsidePointerDown);
   }, [openLoginMenuInstanceId]);
 
   useEffect(() => {
@@ -1590,7 +2004,8 @@ function AuthFilesSection({
     }
 
     document.addEventListener("pointerdown", closeOnOutsidePointerDown);
-    return () => document.removeEventListener("pointerdown", closeOnOutsidePointerDown);
+    return () =>
+      document.removeEventListener("pointerdown", closeOnOutsidePointerDown);
   }, [openBulkMenuInstanceId]);
 
   useEffect(() => {
@@ -1603,14 +2018,18 @@ function AuthFilesSection({
       if (target instanceof Node && exchangeMenuRef.current?.contains(target)) {
         return;
       }
-      if (target instanceof Node && exchangeTriggerRef.current?.contains(target)) {
+      if (
+        target instanceof Node &&
+        exchangeTriggerRef.current?.contains(target)
+      ) {
         return;
       }
       setOpenExchangeMenuInstanceId(null);
     }
 
     document.addEventListener("pointerdown", closeOnOutsidePointerDown);
-    return () => document.removeEventListener("pointerdown", closeOnOutsidePointerDown);
+    return () =>
+      document.removeEventListener("pointerdown", closeOnOutsidePointerDown);
   }, [openExchangeMenuInstanceId]);
 
   useEffect(() => {
@@ -1622,16 +2041,19 @@ function AuthFilesSection({
   }, []);
 
   function openMoveDialog(row: AuthFileQuotaRow) {
-    const firstTarget = enabledInstances.find((instance) => instance.id !== row.cpaInstanceId);
+    const firstTarget = enabledInstances.find(
+      (instance) => instance.id !== row.cpaInstanceId,
+    );
     setMoveTarget(row);
     setMoveTargetInstanceId(firstTarget ? String(firstTarget.id) : "");
   }
 
   function openProxyDialog(row: AuthFileQuotaRow) {
     const proxyOptions = proxiesForCpa(row.cpaInstanceId);
-    const currentProxyUrl = row.proxyUrl && proxyOptions.some((proxy) => proxy.url === row.proxyUrl)
-      ? row.proxyUrl
-      : "";
+    const currentProxyUrl =
+      row.proxyUrl && proxyOptions.some((proxy) => proxy.url === row.proxyUrl)
+        ? row.proxyUrl
+        : "";
     setProxyTarget(row);
     setProxyTargetUrl(currentProxyUrl);
   }
@@ -1664,7 +2086,9 @@ function AuthFilesSection({
     instance: CpaInstance,
     rows: AuthFileQuotaRow[],
   ) {
-    const firstTarget = enabledInstances.find((target) => target.id !== instance.id);
+    const firstTarget = enabledInstances.find(
+      (target) => target.id !== instance.id,
+    );
     setOpenExchangeMenuInstanceId(null);
     setExchangeDialog({
       mode,
@@ -1717,17 +2141,25 @@ function AuthFilesSection({
 
     const selectedIds = exchangeDialog.selectedIds;
     const targetCpaInstanceId = Number(exchangeDialog.targetCpaInstanceId);
-    setExchangeDialog((current) => current ? { ...current, submitting: true } : current);
+    setExchangeDialog((current) =>
+      current ? { ...current, submitting: true } : current,
+    );
     try {
       if (exchangeDialog.mode === "download") {
         await onDownloadAuthFiles(exchangeDialog.instance.id, selectedIds);
       } else {
-        await onMoveAuthFiles(exchangeDialog.instance.id, selectedIds, targetCpaInstanceId);
+        await onMoveAuthFiles(
+          exchangeDialog.instance.id,
+          selectedIds,
+          targetCpaInstanceId,
+        );
       }
       setExchangeDialog(null);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : String(error));
-      setExchangeDialog((current) => current ? { ...current, submitting: false } : current);
+      setExchangeDialog((current) =>
+        current ? { ...current, submitting: false } : current,
+      );
     }
   }
 
@@ -1738,9 +2170,13 @@ function AuthFilesSection({
   }
 
   const moveOptions = moveTarget
-    ? enabledInstances.filter((instance) => instance.id !== moveTarget.cpaInstanceId)
+    ? enabledInstances.filter(
+        (instance) => instance.id !== moveTarget.cpaInstanceId,
+      )
     : [];
-  const proxyOptions = proxyTarget ? proxiesForCpa(proxyTarget.cpaInstanceId) : [];
+  const proxyOptions = proxyTarget
+    ? proxiesForCpa(proxyTarget.cpaInstanceId)
+    : [];
 
   function openRtLogin(instance: CpaInstance, mode: RtLoginMode = "rt") {
     setOpenLoginMenuInstanceId(null);
@@ -1771,7 +2207,9 @@ function AuthFilesSection({
     });
   }
 
-  async function handleCpaJsonInputChange(event: ChangeEvent<HTMLInputElement>) {
+  async function handleCpaJsonInputChange(
+    event: ChangeEvent<HTMLInputElement>,
+  ) {
     const input = event.currentTarget;
     const files = Array.from(input.files ?? []);
     input.value = "";
@@ -1838,7 +2276,9 @@ function AuthFilesSection({
     const text = sessionJson.text.trim();
     if (!text) {
       const message = "请先粘贴 Session JSON";
-      setSessionJson((current) => current ? { ...current, error: message } : current);
+      setSessionJson((current) =>
+        current ? { ...current, error: message } : current,
+      );
       toast.error(message);
       return;
     }
@@ -1848,19 +2288,25 @@ function AuthFilesSection({
       payload = JSON.parse(text) as unknown;
     } catch {
       const message = "Session JSON 解析失败，请确认内容是合法 JSON";
-      setSessionJson((current) => current ? { ...current, error: message } : current);
+      setSessionJson((current) =>
+        current ? { ...current, error: message } : current,
+      );
       toast.error(message);
       return;
     }
 
     if (!isJsonObject(payload) && !Array.isArray(payload)) {
       const message = "Session JSON 必须是 JSON 对象或数组";
-      setSessionJson((current) => current ? { ...current, error: message } : current);
+      setSessionJson((current) =>
+        current ? { ...current, error: message } : current,
+      );
       toast.error(message);
       return;
     }
 
-    setSessionJson((current) => current ? { ...current, stage: "uploading", error: null } : current);
+    setSessionJson((current) =>
+      current ? { ...current, stage: "uploading", error: null } : current,
+    );
     try {
       const result = await onUploadCpaJsonFiles(
         sessionJson.instance.id,
@@ -1870,7 +2316,9 @@ function AuthFilesSection({
       const uploaded = result?.uploaded ?? 0;
       const failed = result?.failed ?? 0;
       if (uploaded === 0 && failed > 0) {
-        const firstError = result?.results.find((item) => item.status === "error")?.error;
+        const firstError = result?.results.find(
+          (item) => item.status === "error",
+        )?.error;
         throw new Error(firstError ?? "Session JSON 转换失败");
       }
       if (failed > 0) {
@@ -1881,12 +2329,17 @@ function AuthFilesSection({
       setSessionJson(null);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      setSessionJson((current) => current ? { ...current, stage: "input", error: message } : current);
+      setSessionJson((current) =>
+        current ? { ...current, stage: "input", error: message } : current,
+      );
       toast.error(message);
     }
   }
 
-  function handleCpaJsonDragEnter(event: DragEvent<HTMLElement>, instance: CpaInstance) {
+  function handleCpaJsonDragEnter(
+    event: DragEvent<HTMLElement>,
+    instance: CpaInstance,
+  ) {
     if (!hasDraggedFiles(event)) {
       return;
     }
@@ -1895,7 +2348,10 @@ function AuthFilesSection({
     setDragTargetCpaId(instance.id);
   }
 
-  function handleCpaJsonDragOver(event: DragEvent<HTMLElement>, instance: CpaInstance) {
+  function handleCpaJsonDragOver(
+    event: DragEvent<HTMLElement>,
+    instance: CpaInstance,
+  ) {
     if (!hasDraggedFiles(event)) {
       return;
     }
@@ -1907,18 +2363,27 @@ function AuthFilesSection({
     }
   }
 
-  function handleCpaJsonDragLeave(event: DragEvent<HTMLElement>, instance: CpaInstance) {
+  function handleCpaJsonDragLeave(
+    event: DragEvent<HTMLElement>,
+    instance: CpaInstance,
+  ) {
     if (dragTargetCpaId !== instance.id) {
       return;
     }
     const relatedTarget = event.relatedTarget;
-    if (relatedTarget instanceof Node && event.currentTarget.contains(relatedTarget)) {
+    if (
+      relatedTarget instanceof Node &&
+      event.currentTarget.contains(relatedTarget)
+    ) {
       return;
     }
     setDragTargetCpaId(null);
   }
 
-  function handleCpaJsonDrop(event: DragEvent<HTMLElement>, instance: CpaInstance) {
+  function handleCpaJsonDrop(
+    event: DragEvent<HTMLElement>,
+    instance: CpaInstance,
+  ) {
     if (!hasDraggedFiles(event)) {
       return;
     }
@@ -2018,7 +2483,11 @@ function AuthFilesSection({
     );
   }
 
-  async function loginRtRow(instance: CpaInstance, mode: RtLoginMode, row: RtLoginUiRow) {
+  async function loginRtRow(
+    instance: CpaInstance,
+    mode: RtLoginMode,
+    row: RtLoginUiRow,
+  ) {
     updateRtLoginRow(row.id, { status: "logging-in", error: null });
     try {
       const result = await onRtLoginAccount(instance.id, mode, row.sourceLine, {
@@ -2039,8 +2508,18 @@ function AuthFilesSection({
     }
   }
 
-  async function runRtLoginRows(instance: CpaInstance, mode: RtLoginMode, rows: RtLoginUiRow[]) {
-    const proxyIds = [...new Set(rows.map((row) => row.proxyId).filter((id): id is number => id !== null))];
+  async function runRtLoginRows(
+    instance: CpaInstance,
+    mode: RtLoginMode,
+    rows: RtLoginUiRow[],
+  ) {
+    const proxyIds = [
+      ...new Set(
+        rows
+          .map((row) => row.proxyId)
+          .filter((id): id is number => id !== null),
+      ),
+    ];
     if (proxyIds.length > 0) {
       await Promise.all(
         proxyIds.map(async (proxyId) => {
@@ -2070,25 +2549,33 @@ function AuthFilesSection({
     const parsed = parseRtLoginInput(rtLogin.text);
     if (rtLogin.proxyMode === "pool" && enabledLoginProxies.length === 0) {
       const message = "没有启用的代理可用于代理池登录";
-      setRtLogin((current) => current ? { ...current, error: message } : current);
+      setRtLogin((current) =>
+        current ? { ...current, error: message } : current,
+      );
       toast.error(message);
       return;
     }
 
     if (parsed.valid.length === 0 || parsed.invalid.length > 0) {
-      const invalidLines = parsed.invalid.map((item) => `第 ${item.lineNumber} 行`).join("、");
-      const message = parsed.valid.length === 0
-        ? "请输入至少一条有效 RT"
-        : `${invalidLines} 格式不正确，请确认每行包含 rt_ 开头的 refresh token`;
-      setRtLogin((current) => current ? { ...current, error: message } : current);
+      const invalidLines = parsed.invalid
+        .map((item) => `第 ${item.lineNumber} 行`)
+        .join("、");
+      const message =
+        parsed.valid.length === 0
+          ? "请输入至少一条有效 RT"
+          : `${invalidLines} 格式不正确，请确认每行包含 rt_ 开头的 refresh token`;
+      setRtLogin((current) =>
+        current ? { ...current, error: message } : current,
+      );
       toast.error(message);
       return;
     }
 
     const rows: RtLoginUiRow[] = parsed.valid.map((row, index) => {
-      const proxy = rtLogin.proxyMode === "pool"
-        ? enabledLoginProxies[index % enabledLoginProxies.length]
-        : null;
+      const proxy =
+        rtLogin.proxyMode === "pool"
+          ? enabledLoginProxies[index % enabledLoginProxies.length]
+          : null;
       return {
         id: `${row.lineNumber}-${row.refreshToken}`,
         lineNumber: row.lineNumber,
@@ -2117,14 +2604,18 @@ function AuthFilesSection({
     }
 
     const { instance, mode } = rtLogin;
-    setRtLogin((current) => current ? { ...current, stage: "processing" } : current);
+    setRtLogin((current) =>
+      current ? { ...current, stage: "processing" } : current,
+    );
     await loginRtRow(instance, mode, row);
     setRtLogin((current) => {
       if (!current) {
         return current;
       }
 
-      const finished = current.rows.every((item) => item.status === "success" || item.status === "failed");
+      const finished = current.rows.every(
+        (item) => item.status === "success" || item.status === "failed",
+      );
       return finished ? { ...current, stage: "review" } : current;
     });
   }
@@ -2142,9 +2633,15 @@ function AuthFilesSection({
       return;
     }
 
-    setRtLogin((current) => current ? { ...current, stage: "uploading", error: null } : current);
+    setRtLogin((current) =>
+      current ? { ...current, stage: "uploading", error: null } : current,
+    );
     try {
-      const result = await onUploadRtLoginAccounts(rtLogin.instance.id, rtLogin.mode, entries);
+      const result = await onUploadRtLoginAccounts(
+        rtLogin.instance.id,
+        rtLogin.mode,
+        entries,
+      );
       const uploaded = result?.uploaded ?? entries.length;
       const failed = result?.failed ?? 0;
       if (failed > 0) {
@@ -2155,7 +2652,9 @@ function AuthFilesSection({
       setRtLogin(null);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      setRtLogin((current) => current ? { ...current, stage: "review", error: message } : current);
+      setRtLogin((current) =>
+        current ? { ...current, stage: "review", error: message } : current,
+      );
       toast.error(message);
     }
   }
@@ -2165,359 +2664,447 @@ function AuthFilesSection({
       ? distributeCpaGroups(enabledGroups)
       : [enabledGroups];
   const exchangeMoveOptions = exchangeDialog
-    ? enabledInstances.filter((instance) => instance.id !== exchangeDialog.instance.id)
+    ? enabledInstances.filter(
+        (instance) => instance.id !== exchangeDialog.instance.id,
+      )
     : [];
   const exchangeSelectedCount = exchangeDialog?.selectedIds.length ?? 0;
   const exchangeAvailableCount = exchangeDialog
-    ? selectAvailableAuthFileIds(exchangeDialog.rows, exchangeDialog.rows.length).length
+    ? selectAvailableAuthFileIds(
+        exchangeDialog.rows,
+        exchangeDialog.rows.length,
+      ).length
     : 0;
   const exchangeAllSelected = Boolean(
     exchangeDialog &&
-      exchangeDialog.rows.length > 0 &&
-      exchangeDialog.selectedIds.length === exchangeDialog.rows.length,
+    exchangeDialog.rows.length > 0 &&
+    exchangeDialog.selectedIds.length === exchangeDialog.rows.length,
   );
 
-  function renderGroupCard(group: { instance: CpaInstance; authFiles: AuthFile[] }) {
-          const quotaGroup = quotaGroups.find((item) => item.instance.id === group.instance.id);
-          const rows = mergeAuthFilesWithQuotas(group.authFiles, quotaGroup?.quotas ?? [], proxyNameByUrl);
-          const activeRows = rows.filter((row) => !row.disabled);
-          const exceptionRows = activeRows.filter((row) => row.quotaStatus === "exception");
-          const limitedRows = activeRows.filter((row) => row.quotaStatus === "limited");
-          const exceptionAuthFileIds = exceptionRows.map((row) => row.id);
-          const disabledRows = rows.filter((row) => row.disabled);
-          const disabledAuthFileIds = disabledRows.map((row) => row.id);
-          const freeRows = rows.filter((row) => isFreeSubscriptionType(row.subscriptionType));
-          const activeFreeRows = activeRows.filter((row) => isFreeSubscriptionType(row.subscriptionType));
-          const freeAuthFileIds = freeRows.map((row) => row.id);
-          const activeFreeAuthFileIds = activeFreeRows.map((row) => row.id);
-          const disabledCount = disabledRows.length;
-          const exceptionCount = exceptionRows.length;
-          const availableCount = activeRows.filter((row) => row.quotaStatus === "available").length;
-          const hasAssignableProxy = proxiesForCpa(group.instance.id).length > 0;
-          const average5hRemaining = averageRemainingPercent(activeRows.map((row) => row.usage5hPercent));
-          const averageWeekRemaining = averageRemainingPercent(activeRows.map((row) => row.usageWeekPercent));
-          const isUpdating = updatingCpaIds.has(group.instance.id);
-          const isDragTarget = dragTargetCpaId === group.instance.id;
-          const hasOpenHeaderMenu =
-            openLoginMenuInstanceId === group.instance.id ||
-            openBulkMenuInstanceId === group.instance.id ||
-            openExchangeMenuInstanceId === group.instance.id;
+  function renderGroupCard(group: {
+    instance: CpaInstance;
+    authFiles: AuthFile[];
+  }) {
+    const quotaGroup = quotaGroups.find(
+      (item) => item.instance.id === group.instance.id,
+    );
+    const rows = mergeAuthFilesWithQuotas(
+      group.authFiles,
+      quotaGroup?.quotas ?? [],
+      proxyNameByUrl,
+    );
+    const activeRows = rows.filter((row) => !row.disabled);
+    const exceptionRows = activeRows.filter(
+      (row) => row.quotaStatus === "exception",
+    );
+    const limitedRows = activeRows.filter(
+      (row) => row.quotaStatus === "limited",
+    );
+    const exceptionAuthFileIds = exceptionRows.map((row) => row.id);
+    const disabledRows = rows.filter((row) => row.disabled);
+    const disabledAuthFileIds = disabledRows.map((row) => row.id);
+    const freeRows = rows.filter((row) =>
+      isFreeSubscriptionType(row.subscriptionType),
+    );
+    const activeFreeRows = activeRows.filter((row) =>
+      isFreeSubscriptionType(row.subscriptionType),
+    );
+    const freeAuthFileIds = freeRows.map((row) => row.id);
+    const activeFreeAuthFileIds = activeFreeRows.map((row) => row.id);
+    const disabledCount = disabledRows.length;
+    const exceptionCount = exceptionRows.length;
+    const availableCount = activeRows.filter(
+      (row) => row.quotaStatus === "available",
+    ).length;
+    const hasAssignableProxy = proxiesForCpa(group.instance.id).length > 0;
+    const average5hRemaining = averageRemainingPercent(
+      activeRows.map((row) => row.usage5hPercent),
+    );
+    const averageWeekRemaining = averageRemainingPercent(
+      activeRows.map((row) => row.usageWeekPercent),
+    );
+    const isUpdating = updatingCpaIds.has(group.instance.id);
+    const isDragTarget = dragTargetCpaId === group.instance.id;
+    const hasOpenHeaderMenu =
+      openLoginMenuInstanceId === group.instance.id ||
+      openBulkMenuInstanceId === group.instance.id ||
+      openExchangeMenuInstanceId === group.instance.id;
 
-          return (
-            <div
-              key={group.instance.id}
-              aria-busy={isUpdating}
-              className={cn(
-                "relative min-w-0 rounded-md border bg-card",
-                isDragTarget && "border-primary/60 ring-2 ring-primary/30",
-                hasOpenHeaderMenu ? "z-50 overflow-visible" : "overflow-hidden",
-              )}
-              onDragEnter={(event) => handleCpaJsonDragEnter(event, group.instance)}
-              onDragOver={(event) => handleCpaJsonDragOver(event, group.instance)}
-              onDragLeave={(event) => handleCpaJsonDragLeave(event, group.instance)}
-              onDrop={(event) => handleCpaJsonDrop(event, group.instance)}
+    return (
+      <div
+        key={group.instance.id}
+        aria-busy={isUpdating}
+        className={cn(
+          "relative min-w-0 rounded-md border bg-card",
+          isDragTarget && "border-primary/60 ring-2 ring-primary/30",
+          hasOpenHeaderMenu ? "z-50 overflow-visible" : "overflow-hidden",
+        )}
+        onDragEnter={(event) => handleCpaJsonDragEnter(event, group.instance)}
+        onDragOver={(event) => handleCpaJsonDragOver(event, group.instance)}
+        onDragLeave={(event) => handleCpaJsonDragLeave(event, group.instance)}
+        onDrop={(event) => handleCpaJsonDrop(event, group.instance)}
+      >
+        <div className="space-y-2 border-b bg-muted/35 px-3 py-2">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <a
+              href={buildCpaManagementHref(group.instance.baseUrl)}
+              target="_blank"
+              rel="noreferrer"
+              className="truncate text-sm font-semibold hover:text-primary hover:underline"
             >
-              <div className="space-y-2 border-b bg-muted/35 px-3 py-2">
-                <div className="flex min-w-0 flex-wrap items-center gap-2">
-                  <a
-                    href={buildCpaManagementHref(group.instance.baseUrl)}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="truncate text-sm font-semibold hover:text-primary hover:underline"
-                  >
-                    {group.instance.name}
-                  </a>
-                  <Badge variant="secondary">{rows.length}</Badge>
-                  <Button
-                    type="button"
-                    size="icon-xs"
-                    variant="ghost"
-                    aria-label={`刷新 ${group.instance.name}`}
-                    title="刷新"
-                    disabled={isUpdating}
-                    onClick={() => void onRefreshCpa(group.instance.id)}
-                  >
-                    <RefreshCw className={cn("h-3.5 w-3.5", isUpdating && "animate-spin")} />
-                  </Button>
-                  <div ref={openLoginMenuInstanceId === group.instance.id ? loginMenuRef : null} className="relative">
-	                    <Button
-	                      type="button"
-	                      size="xs"
-	                      variant="outline"
-	                      aria-expanded={openLoginMenuInstanceId === group.instance.id}
-	                      onClick={() => {
-	                        setOpenBulkMenuInstanceId(null);
-	                        setOpenExchangeMenuInstanceId(null);
-	                        setOpenLoginMenuInstanceId(
-	                          openLoginMenuInstanceId === group.instance.id ? null : group.instance.id,
-	                        );
-	                      }}
-	                    >
-                      <Plus className="h-3 w-3" />
-                      补号
-                    </Button>
-                    {openLoginMenuInstanceId === group.instance.id ? (
-                      <div className="absolute left-0 top-8 z-[60] min-w-32 rounded-md border bg-popover p-1 text-popover-foreground shadow-md">
-                        <button
-                          type="button"
-                          className="flex w-full items-center gap-1.5 rounded px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground"
-                          onClick={() => openRtLogin(group.instance)}
-                        >
-                          <LogIn className="h-3 w-3" />
-                          RT 登录
-                        </button>
-                        <button
-                          type="button"
-                          className="flex w-full items-center gap-1.5 rounded px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground"
-                          onClick={() => openCpaJsonPicker(group.instance)}
-                        >
-                          <FileKey2 className="h-3 w-3" />
-                          JSON 文件
-                        </button>
-                        <button
-                          type="button"
-                          className="flex w-full items-center gap-1.5 rounded px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground"
-                          onClick={() => openSessionJsonDialog(group.instance)}
-                        >
-                          <FileKey2 className="h-3 w-3" />
-                          Session JSON
-                        </button>
-                        <Separator className="my-1" />
-                        <button
-                          type="button"
-                          className="flex w-full items-center gap-1.5 rounded px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground"
-                          onClick={() => openOAuthLogin(group.instance)}
-                        >
-                          <LogIn className="h-3 w-3" />
-                          OAuth登录
-                        </button>
-                      </div>
-	                    ) : null}
-	                  </div>
-	                  <div className="relative">
-	                    <Button
-	                      ref={openExchangeMenuInstanceId === group.instance.id ? exchangeTriggerRef : null}
-	                      type="button"
-	                      size="xs"
-	                      variant="outline"
-	                      aria-label={`${group.instance.name} 交换`}
-	                      aria-expanded={openExchangeMenuInstanceId === group.instance.id}
-	                      aria-haspopup="menu"
-	                      disabled={rows.length === 0 || isUpdating}
-	                      title={rows.length === 0 ? "暂无账号" : undefined}
-	                      onClick={(event) => toggleExchangeMenu(event, group.instance.id)}
-	                    >
-	                      <ArrowLeftRight className="h-3 w-3" />
-	                      交换
-	                    </Button>
-	                    {openExchangeMenuInstanceId === group.instance.id && typeof document !== "undefined"
-	                      ? createPortal(
-	                          <div
-	                            ref={exchangeMenuRef}
-	                            role="menu"
-	                            className="fixed z-[120] min-w-28 rounded-md border bg-popover p-1 text-popover-foreground shadow-md"
-	                            style={{ left: exchangeMenuPosition.left, top: exchangeMenuPosition.top }}
-	                          >
-	                            <button
-	                              type="button"
-	                              role="menuitem"
-	                              className="flex w-full items-center rounded px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground"
-	                              onClick={() => openExchangeDialog("download", group.instance, rows)}
-	                            >
-	                              取号
-	                            </button>
-	                            <button
-	                              type="button"
-	                              role="menuitem"
-	                              disabled={enabledInstances.length <= 1}
-	                              className="flex w-full items-center rounded px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-50"
-	                              onClick={() => openExchangeDialog("move", group.instance, rows)}
-	                            >
-	                              移动
-	                            </button>
-	                          </div>,
-	                          document.body,
-	                        )
-	                      : null}
-	                  </div>
-	                  <div ref={openBulkMenuInstanceId === group.instance.id ? bulkMenuRef : null} className="relative">
-	                    <Button
-	                      type="button"
-	                      size="icon-xs"
-	                      variant="ghost"
-	                      aria-label={`${group.instance.name} 批量操作`}
-	                      aria-expanded={openBulkMenuInstanceId === group.instance.id}
-	                      onClick={() => {
-	                        setOpenLoginMenuInstanceId(null);
-	                        setOpenExchangeMenuInstanceId(null);
-	                        setOpenBulkMenuInstanceId(
-	                          openBulkMenuInstanceId === group.instance.id ? null : group.instance.id,
-	                        );
-	                      }}
-	                    >
-                      <MoreHorizontal className="h-4 w-4" />
-                    </Button>
-                    {openBulkMenuInstanceId === group.instance.id ? (
-                      <div className="absolute left-0 top-7 z-[60] min-w-40 rounded-md border bg-popover p-1 text-popover-foreground shadow-md">
-                        <button
-                          type="button"
-                          disabled={!hasAssignableProxy || isUpdating}
-                          title={!hasAssignableProxy ? "没有启用且允许用于该 CPA 的代理" : undefined}
-                          className="flex w-full items-center rounded px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-45"
-                          onClick={() => {
-                            setOpenBulkMenuInstanceId(null);
-                            void onAutoAssignCpaProxies(group.instance.id);
-                          }}
-                        >
-                          自动分配代理
-                        </button>
-                        <Separator className="my-1" />
-                        <button
-                          type="button"
-                          disabled={exceptionAuthFileIds.length === 0}
-                          title={exceptionAuthFileIds.length === 0 ? "暂无异常账号" : undefined}
-                          className="flex w-full items-center rounded px-2 py-1.5 text-left text-xs text-rose-700 hover:bg-rose-50 hover:text-rose-800 disabled:pointer-events-none disabled:opacity-45"
-                          onClick={() => {
-                            setOpenBulkMenuInstanceId(null);
-                            setBulkExceptionTarget({
-                              instance: group.instance,
-                              action: "portalExceptions",
-                              authFileIds: exceptionAuthFileIds,
-                              title: "批量清理异常账号",
-                              subject: "异常账号",
-                              confirmVerb: "清理",
-                              successVerb: "已清理到异常账号",
-                            });
-                          }}
-                        >
-                          批量清理异常账号
-                        </button>
-                        <button
-                          type="button"
-                          disabled={exceptionAuthFileIds.length === 0}
-                          title={exceptionAuthFileIds.length === 0 ? "暂无异常账号" : undefined}
-                          className="flex w-full items-center rounded px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-45"
-                          onClick={() => {
-                            setOpenBulkMenuInstanceId(null);
-                            setBulkExceptionTarget({
-                              instance: group.instance,
-                              action: "disable",
-                              authFileIds: exceptionAuthFileIds,
-                              title: "批量停用异常账号",
-                              subject: "异常账号",
-                              confirmVerb: "停用",
-                              successVerb: "已停用",
-                            });
-                          }}
-                        >
-                          批量停用异常账号
-                        </button>
-                        <Separator className="my-1" />
-                        <button
-                          type="button"
-                          disabled={freeAuthFileIds.length === 0}
-                          title={freeAuthFileIds.length === 0 ? "暂无 Free 号" : undefined}
-                          className="flex w-full items-center rounded px-2 py-1.5 text-left text-xs text-rose-700 hover:bg-rose-50 hover:text-rose-800 disabled:pointer-events-none disabled:opacity-45"
-                          onClick={() => {
-                            setOpenBulkMenuInstanceId(null);
-                            setBulkExceptionTarget({
-                              instance: group.instance,
-                              action: "delete",
-                              authFileIds: freeAuthFileIds,
-                              title: "批量清理Free号",
-                              subject: "Free号",
-                              confirmVerb: "清理",
-                              successVerb: "已清理",
-                              target: "free",
-                            });
-                          }}
-                        >
-                          批量清理Free号
-                        </button>
-                        <button
-                          type="button"
-                          disabled={activeFreeAuthFileIds.length === 0}
-                          title={activeFreeAuthFileIds.length === 0 ? "暂无可停用 Free 号" : undefined}
-                          className="flex w-full items-center rounded px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-45"
-                          onClick={() => {
-                            setOpenBulkMenuInstanceId(null);
-                            setBulkExceptionTarget({
-                              instance: group.instance,
-                              action: "disable",
-                              authFileIds: activeFreeAuthFileIds,
-                              title: "批量停用Free号",
-                              subject: "Free号",
-                              confirmVerb: "停用",
-                              successVerb: "已停用",
-                              target: "free",
-                            });
-                          }}
-                        >
-                          批量停用Free号
-                        </button>
-                        <Separator className="my-1" />
-                        <button
-                          type="button"
-                          disabled={disabledAuthFileIds.length === 0}
-                          title={disabledAuthFileIds.length === 0 ? "暂无已停用账号" : undefined}
-                          className="flex w-full items-center rounded px-2 py-1.5 text-left text-xs text-rose-700 hover:bg-rose-50 hover:text-rose-800 disabled:pointer-events-none disabled:opacity-45"
-                          onClick={() => {
-                            setOpenBulkMenuInstanceId(null);
-                            setBulkExceptionTarget({
-                              instance: group.instance,
-                              action: "delete",
-                              authFileIds: disabledAuthFileIds,
-                              title: "批量删除已停用账号",
-                              subject: "已停用账号",
-                              confirmVerb: "删除",
-                              successVerb: "已删除",
-                            });
-                          }}
-                        >
-                          批量删除已停用账号
-                        </button>
-                      </div>
-                    ) : null}
-                  </div>
-                </div>
-                <div className="flex w-full flex-wrap items-center gap-x-2 gap-y-1 border-t border-border/50 pt-1.5 text-xs text-muted-foreground">
-                  <HeaderAverageMeter label="5h均剩余" value={average5hRemaining} />
-                  <HeaderAverageMeter label="周均剩余" value={averageWeekRemaining} />
-                  <span className="text-emerald-700">{availableCount} 可用</span>
-                  {limitedRows.length > 0 ? <span className="text-amber-700">{limitedRows.length} 限额</span> : null}
-                  {disabledCount > 0 ? <span>{disabledCount} 停用</span> : null}
-                  <span className="text-rose-700">{exceptionCount} 异常</span>
-                </div>
-              </div>
-              <CompactAuthFileTable
-                rows={rows}
-                nowMs={nowMs}
-                canMove={enabledInstances.length > 1}
-                onRequestDelete={setDeleteTarget}
-                onRequestPortalException={(row) => void onPortalExceptionAuthFile(row.id)}
-                onRequestMove={openMoveDialog}
-                onRequestConfigureProxy={openProxyDialog}
-                onToggleDisabled={onToggleAuthFileDisabled}
-                onRefreshQuota={onRefreshAuthFileQuota}
+              {group.instance.name}
+            </a>
+            <Badge variant="secondary">{rows.length}</Badge>
+            <Button
+              type="button"
+              size="icon-xs"
+              variant="ghost"
+              aria-label={`刷新 ${group.instance.name}`}
+              title="刷新"
+              disabled={isUpdating}
+              onClick={() => void onRefreshCpa(group.instance.id)}
+            >
+              <RefreshCw
+                className={cn("h-3.5 w-3.5", isUpdating && "animate-spin")}
               />
-              {isDragTarget ? (
-                <div className="pointer-events-none absolute inset-0 z-[55] flex items-center justify-center bg-background/75 backdrop-blur-[1px]">
-                  <div className="flex items-center gap-2 rounded-md border border-primary/30 bg-card px-3 py-2 text-sm font-medium text-primary shadow-sm">
-                    <FileKey2 className="h-4 w-4" />
-                    松开上传 JSON 文件到 {group.instance.name}
-                  </div>
-                </div>
-              ) : null}
-              {isUpdating ? (
-                <div className="absolute inset-0 z-40 flex items-center justify-center bg-background/70 backdrop-blur-[1px]">
-                  <div className="flex items-center gap-2 rounded-md border bg-card px-3 py-2 text-sm font-medium shadow-sm">
-                    <Loader2 className="h-4 w-4 animate-spin text-primary" />
-                    正在更新
-                  </div>
+            </Button>
+            <div
+              ref={
+                openLoginMenuInstanceId === group.instance.id
+                  ? loginMenuRef
+                  : null
+              }
+              className="relative"
+            >
+              <Button
+                type="button"
+                size="xs"
+                variant="outline"
+                aria-expanded={openLoginMenuInstanceId === group.instance.id}
+                onClick={() => {
+                  setOpenBulkMenuInstanceId(null);
+                  setOpenExchangeMenuInstanceId(null);
+                  setOpenLoginMenuInstanceId(
+                    openLoginMenuInstanceId === group.instance.id
+                      ? null
+                      : group.instance.id,
+                  );
+                }}
+              >
+                <Plus className="h-3 w-3" />
+                补号
+              </Button>
+              {openLoginMenuInstanceId === group.instance.id ? (
+                <div className="absolute left-0 top-8 z-[60] min-w-32 rounded-md border bg-popover p-1 text-popover-foreground shadow-md">
+                  <button
+                    type="button"
+                    className="flex w-full items-center gap-1.5 rounded px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground"
+                    onClick={() => openRtLogin(group.instance)}
+                  >
+                    <LogIn className="h-3 w-3" />
+                    RT 登录
+                  </button>
+                  <button
+                    type="button"
+                    className="flex w-full items-center gap-1.5 rounded px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground"
+                    onClick={() => openCpaJsonPicker(group.instance)}
+                  >
+                    <FileKey2 className="h-3 w-3" />
+                    JSON 文件
+                  </button>
+                  <button
+                    type="button"
+                    className="flex w-full items-center gap-1.5 rounded px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground"
+                    onClick={() => openSessionJsonDialog(group.instance)}
+                  >
+                    <FileKey2 className="h-3 w-3" />
+                    Session JSON
+                  </button>
+                  <Separator className="my-1" />
+                  <button
+                    type="button"
+                    className="flex w-full items-center gap-1.5 rounded px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground"
+                    onClick={() => openOAuthLogin(group.instance)}
+                  >
+                    <LogIn className="h-3 w-3" />
+                    OAuth登录
+                  </button>
                 </div>
               ) : null}
             </div>
-          );
+            <div className="relative">
+              <Button
+                ref={
+                  openExchangeMenuInstanceId === group.instance.id
+                    ? exchangeTriggerRef
+                    : null
+                }
+                type="button"
+                size="xs"
+                variant="outline"
+                aria-label={`${group.instance.name} 交换`}
+                aria-expanded={openExchangeMenuInstanceId === group.instance.id}
+                aria-haspopup="menu"
+                disabled={rows.length === 0 || isUpdating}
+                title={rows.length === 0 ? "暂无账号" : undefined}
+                onClick={(event) =>
+                  toggleExchangeMenu(event, group.instance.id)
+                }
+              >
+                <ArrowLeftRight className="h-3 w-3" />
+                交换
+              </Button>
+              {openExchangeMenuInstanceId === group.instance.id &&
+              typeof document !== "undefined"
+                ? createPortal(
+                    <div
+                      ref={exchangeMenuRef}
+                      role="menu"
+                      className="fixed z-[120] min-w-28 rounded-md border bg-popover p-1 text-popover-foreground shadow-md"
+                      style={{
+                        left: exchangeMenuPosition.left,
+                        top: exchangeMenuPosition.top,
+                      }}
+                    >
+                      <button
+                        type="button"
+                        role="menuitem"
+                        className="flex w-full items-center rounded px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground"
+                        onClick={() =>
+                          openExchangeDialog("download", group.instance, rows)
+                        }
+                      >
+                        取号
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        disabled={enabledInstances.length <= 1}
+                        className="flex w-full items-center rounded px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-50"
+                        onClick={() =>
+                          openExchangeDialog("move", group.instance, rows)
+                        }
+                      >
+                        移动
+                      </button>
+                    </div>,
+                    document.body,
+                  )
+                : null}
+            </div>
+            <div
+              ref={
+                openBulkMenuInstanceId === group.instance.id
+                  ? bulkMenuRef
+                  : null
+              }
+              className="relative"
+            >
+              <Button
+                type="button"
+                size="icon-xs"
+                variant="ghost"
+                aria-label={`${group.instance.name} 批量操作`}
+                aria-expanded={openBulkMenuInstanceId === group.instance.id}
+                onClick={() => {
+                  setOpenLoginMenuInstanceId(null);
+                  setOpenExchangeMenuInstanceId(null);
+                  setOpenBulkMenuInstanceId(
+                    openBulkMenuInstanceId === group.instance.id
+                      ? null
+                      : group.instance.id,
+                  );
+                }}
+              >
+                <MoreHorizontal className="h-4 w-4" />
+              </Button>
+              {openBulkMenuInstanceId === group.instance.id ? (
+                <div className="absolute left-0 top-7 z-[60] min-w-40 rounded-md border bg-popover p-1 text-popover-foreground shadow-md">
+                  <button
+                    type="button"
+                    disabled={!hasAssignableProxy || isUpdating}
+                    title={
+                      !hasAssignableProxy
+                        ? "没有启用且允许用于该 CPA 的代理"
+                        : undefined
+                    }
+                    className="flex w-full items-center rounded px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-45"
+                    onClick={() => {
+                      setOpenBulkMenuInstanceId(null);
+                      void onAutoAssignCpaProxies(group.instance.id);
+                    }}
+                  >
+                    自动分配代理
+                  </button>
+                  <Separator className="my-1" />
+                  <button
+                    type="button"
+                    disabled={exceptionAuthFileIds.length === 0}
+                    title={
+                      exceptionAuthFileIds.length === 0
+                        ? "暂无异常账号"
+                        : undefined
+                    }
+                    className="flex w-full items-center rounded px-2 py-1.5 text-left text-xs text-rose-700 hover:bg-rose-50 hover:text-rose-800 disabled:pointer-events-none disabled:opacity-45"
+                    onClick={() => {
+                      setOpenBulkMenuInstanceId(null);
+                      setBulkExceptionTarget({
+                        instance: group.instance,
+                        action: "portalExceptions",
+                        authFileIds: exceptionAuthFileIds,
+                        title: "批量清理异常账号",
+                        subject: "异常账号",
+                        confirmVerb: "清理",
+                        successVerb: "已清理到异常账号",
+                      });
+                    }}
+                  >
+                    批量清理异常账号
+                  </button>
+                  <button
+                    type="button"
+                    disabled={exceptionAuthFileIds.length === 0}
+                    title={
+                      exceptionAuthFileIds.length === 0
+                        ? "暂无异常账号"
+                        : undefined
+                    }
+                    className="flex w-full items-center rounded px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-45"
+                    onClick={() => {
+                      setOpenBulkMenuInstanceId(null);
+                      setBulkExceptionTarget({
+                        instance: group.instance,
+                        action: "disable",
+                        authFileIds: exceptionAuthFileIds,
+                        title: "批量停用异常账号",
+                        subject: "异常账号",
+                        confirmVerb: "停用",
+                        successVerb: "已停用",
+                      });
+                    }}
+                  >
+                    批量停用异常账号
+                  </button>
+                  <Separator className="my-1" />
+                  <button
+                    type="button"
+                    disabled={freeAuthFileIds.length === 0}
+                    title={
+                      freeAuthFileIds.length === 0 ? "暂无 Free 号" : undefined
+                    }
+                    className="flex w-full items-center rounded px-2 py-1.5 text-left text-xs text-rose-700 hover:bg-rose-50 hover:text-rose-800 disabled:pointer-events-none disabled:opacity-45"
+                    onClick={() => {
+                      setOpenBulkMenuInstanceId(null);
+                      setBulkExceptionTarget({
+                        instance: group.instance,
+                        action: "delete",
+                        authFileIds: freeAuthFileIds,
+                        title: "批量清理Free号",
+                        subject: "Free号",
+                        confirmVerb: "清理",
+                        successVerb: "已清理",
+                        target: "free",
+                      });
+                    }}
+                  >
+                    批量清理Free号
+                  </button>
+                  <button
+                    type="button"
+                    disabled={activeFreeAuthFileIds.length === 0}
+                    title={
+                      activeFreeAuthFileIds.length === 0
+                        ? "暂无可停用 Free 号"
+                        : undefined
+                    }
+                    className="flex w-full items-center rounded px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-45"
+                    onClick={() => {
+                      setOpenBulkMenuInstanceId(null);
+                      setBulkExceptionTarget({
+                        instance: group.instance,
+                        action: "disable",
+                        authFileIds: activeFreeAuthFileIds,
+                        title: "批量停用Free号",
+                        subject: "Free号",
+                        confirmVerb: "停用",
+                        successVerb: "已停用",
+                        target: "free",
+                      });
+                    }}
+                  >
+                    批量停用Free号
+                  </button>
+                  <Separator className="my-1" />
+                  <button
+                    type="button"
+                    disabled={disabledAuthFileIds.length === 0}
+                    title={
+                      disabledAuthFileIds.length === 0
+                        ? "暂无已停用账号"
+                        : undefined
+                    }
+                    className="flex w-full items-center rounded px-2 py-1.5 text-left text-xs text-rose-700 hover:bg-rose-50 hover:text-rose-800 disabled:pointer-events-none disabled:opacity-45"
+                    onClick={() => {
+                      setOpenBulkMenuInstanceId(null);
+                      setBulkExceptionTarget({
+                        instance: group.instance,
+                        action: "delete",
+                        authFileIds: disabledAuthFileIds,
+                        title: "批量删除已停用账号",
+                        subject: "已停用账号",
+                        confirmVerb: "删除",
+                        successVerb: "已删除",
+                      });
+                    }}
+                  >
+                    批量删除已停用账号
+                  </button>
+                </div>
+              ) : null}
+            </div>
+          </div>
+          <div className="flex w-full flex-wrap items-center gap-x-2 gap-y-1 border-t border-border/50 pt-1.5 text-xs text-muted-foreground">
+            <HeaderAverageMeter label="5h均剩余" value={average5hRemaining} />
+            <HeaderAverageMeter label="周均剩余" value={averageWeekRemaining} />
+            <span className="text-emerald-700">{availableCount} 可用</span>
+            {limitedRows.length > 0 ? (
+              <span className="text-amber-700">{limitedRows.length} 限额</span>
+            ) : null}
+            {disabledCount > 0 ? <span>{disabledCount} 停用</span> : null}
+            <span className="text-rose-700">{exceptionCount} 异常</span>
+          </div>
+        </div>
+        <CompactAuthFileTable
+          rows={rows}
+          nowMs={nowMs}
+          canMove={enabledInstances.length > 1}
+          onRequestDelete={setDeleteTarget}
+          onRequestPortalException={(row) =>
+            void onPortalExceptionAuthFile(row.id)
+          }
+          onRequestMove={openMoveDialog}
+          onRequestConfigureProxy={openProxyDialog}
+          onToggleDisabled={onToggleAuthFileDisabled}
+          onRefreshQuota={onRefreshAuthFileQuota}
+        />
+        {isDragTarget ? (
+          <div className="pointer-events-none absolute inset-0 z-[55] flex items-center justify-center bg-background/75 backdrop-blur-[1px]">
+            <div className="flex items-center gap-2 rounded-md border border-primary/30 bg-card px-3 py-2 text-sm font-medium text-primary shadow-sm">
+              <FileKey2 className="h-4 w-4" />
+              松开上传 JSON 文件到 {group.instance.name}
+            </div>
+          </div>
+        ) : null}
+        {isUpdating ? (
+          <div className="absolute inset-0 z-40 flex items-center justify-center bg-background/70 backdrop-blur-[1px]">
+            <div className="flex items-center gap-2 rounded-md border bg-card px-3 py-2 text-sm font-medium shadow-sm">
+              <Loader2 className="h-4 w-4 animate-spin text-primary" />
+              正在更新
+            </div>
+          </div>
+        ) : null}
+      </div>
+    );
   }
 
   return (
@@ -2530,7 +3117,11 @@ function AuthFilesSection({
         className="hidden"
         onChange={(event) => void handleCpaJsonInputChange(event)}
       />
-      <section className={cn(groupColumns.length > 1 ? "grid grid-cols-2 gap-3" : "space-y-3")}>
+      <section
+        className={cn(
+          groupColumns.length > 1 ? "grid grid-cols-2 gap-3" : "space-y-3",
+        )}
+      >
         {groupColumns.length === 1
           ? groupColumns[0].map(renderGroupCard)
           : groupColumns.map((column, columnIndex) => (
@@ -2540,16 +3131,25 @@ function AuthFilesSection({
             ))}
       </section>
 
-      <Dialog open={deleteTarget !== null} onOpenChange={(open) => !open && setDeleteTarget(null)}>
+      <Dialog
+        open={deleteTarget !== null}
+        onOpenChange={(open) => !open && setDeleteTarget(null)}
+      >
         <DialogContent>
           <DialogHeader>
             <DialogTitle>删除账号</DialogTitle>
             <DialogDescription>
-              确定要从 CPA 中删除 {deleteTarget?.email ?? deleteTarget?.fileName ?? "这个账号"} 吗？这个操作会同时删除本地记录。
+              确定要从 CPA 中删除{" "}
+              {deleteTarget?.email ?? deleteTarget?.fileName ?? "这个账号"}{" "}
+              吗？这个操作会同时删除本地记录。
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => setDeleteTarget(null)}>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setDeleteTarget(null)}
+            >
               取消
             </Button>
             <Button
@@ -2570,12 +3170,16 @@ function AuthFilesSection({
         </DialogContent>
       </Dialog>
 
-      <Dialog open={moveTarget !== null} onOpenChange={(open) => !open && setMoveTarget(null)}>
+      <Dialog
+        open={moveTarget !== null}
+        onOpenChange={(open) => !open && setMoveTarget(null)}
+      >
         <DialogContent>
           <DialogHeader>
             <DialogTitle>移动账号</DialogTitle>
             <DialogDescription>
-              选择目标 CPA。确认后会先上传认证文件到目标 CPA，再从当前 CPA 删除。
+              选择目标 CPA。确认后会先上传认证文件到目标 CPA，再从当前 CPA
+              删除。
             </DialogDescription>
           </DialogHeader>
           <div className="grid gap-2">
@@ -2593,11 +3197,17 @@ function AuthFilesSection({
               ))}
             </select>
             {moveOptions.length === 0 ? (
-              <div className="text-sm text-muted-foreground">没有其他已启用 CPA 可移动。</div>
+              <div className="text-sm text-muted-foreground">
+                没有其他已启用 CPA 可移动。
+              </div>
             ) : null}
           </div>
           <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => setMoveTarget(null)}>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setMoveTarget(null)}
+            >
               取消
             </Button>
             <Button
@@ -2619,12 +3229,16 @@ function AuthFilesSection({
         </DialogContent>
       </Dialog>
 
-      <Dialog open={proxyTarget !== null} onOpenChange={(open) => !open && setProxyTarget(null)}>
+      <Dialog
+        open={proxyTarget !== null}
+        onOpenChange={(open) => !open && setProxyTarget(null)}
+      >
         <DialogContent>
           <DialogHeader>
             <DialogTitle>配置代理</DialogTitle>
             <DialogDescription>
-              为 {proxyTarget?.email ?? proxyTarget?.fileName ?? "这个账号"} 选择该 CPA 可用的代理。
+              为 {proxyTarget?.email ?? proxyTarget?.fileName ?? "这个账号"}{" "}
+              选择该 CPA 可用的代理。
             </DialogDescription>
           </DialogHeader>
           <div className="grid gap-2">
@@ -2643,11 +3257,17 @@ function AuthFilesSection({
               ))}
             </select>
             {proxyOptions.length === 0 ? (
-              <div className="text-sm text-muted-foreground">这个 CPA 暂无可用代理。</div>
+              <div className="text-sm text-muted-foreground">
+                这个 CPA 暂无可用代理。
+              </div>
             ) : null}
           </div>
           <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => setProxyTarget(null)}>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setProxyTarget(null)}
+            >
               取消
             </Button>
             <Button
@@ -2672,12 +3292,20 @@ function AuthFilesSection({
       <Dialog
         open={rtLogin !== null}
         onOpenChange={(open) => {
-          if (!open && rtLogin?.stage !== "processing" && rtLogin?.stage !== "uploading") {
+          if (
+            !open &&
+            rtLogin?.stage !== "processing" &&
+            rtLogin?.stage !== "uploading"
+          ) {
             setRtLogin(null);
           }
         }}
       >
-        <DialogContent className={cn(rtLogin?.stage === "input" ? "sm:max-w-2xl" : "sm:max-w-3xl")}>
+        <DialogContent
+          className={cn(
+            rtLogin?.stage === "input" ? "sm:max-w-2xl" : "sm:max-w-3xl",
+          )}
+        >
           <DialogHeader>
             <DialogTitle>RT 登录</DialogTitle>
             <DialogDescription>
@@ -2701,7 +3329,9 @@ function AuthFilesSection({
                     )}
                     onClick={() =>
                       setRtLogin((current) =>
-                        current ? { ...current, mode: "rt", error: null } : current,
+                        current
+                          ? { ...current, mode: "rt", error: null }
+                          : current,
                       )
                     }
                   >
@@ -2719,7 +3349,9 @@ function AuthFilesSection({
                     )}
                     onClick={() =>
                       setRtLogin((current) =>
-                        current ? { ...current, mode: "mobile_rt", error: null } : current,
+                        current
+                          ? { ...current, mode: "mobile_rt", error: null }
+                          : current,
                       )
                     }
                   >
@@ -2742,7 +3374,9 @@ function AuthFilesSection({
                     )}
                     onClick={() =>
                       setRtLogin((current) =>
-                        current ? { ...current, proxyMode: "none", error: null } : current,
+                        current
+                          ? { ...current, proxyMode: "none", error: null }
+                          : current,
                       )
                     }
                   >
@@ -2753,7 +3387,11 @@ function AuthFilesSection({
                     size="xs"
                     variant="ghost"
                     disabled={enabledLoginProxies.length === 0}
-                    title={enabledLoginProxies.length === 0 ? "暂无启用代理" : undefined}
+                    title={
+                      enabledLoginProxies.length === 0
+                        ? "暂无启用代理"
+                        : undefined
+                    }
                     className={cn(
                       "h-9 rounded-full border px-4 text-sm font-semibold shadow-none disabled:opacity-45",
                       rtLogin.proxyMode === "pool"
@@ -2762,7 +3400,9 @@ function AuthFilesSection({
                     )}
                     onClick={() =>
                       setRtLogin((current) =>
-                        current ? { ...current, proxyMode: "pool", error: null } : current,
+                        current
+                          ? { ...current, proxyMode: "pool", error: null }
+                          : current,
                       )
                     }
                   >
@@ -2770,7 +3410,9 @@ function AuthFilesSection({
                     用代理池登录
                   </Button>
                   {rtLogin.proxyMode === "pool" ? (
-                    <Badge variant="outline">{enabledLoginProxies.length} 个代理</Badge>
+                    <Badge variant="outline">
+                      {enabledLoginProxies.length} 个代理
+                    </Badge>
                   ) : null}
                 </div>
               </div>
@@ -2780,10 +3422,16 @@ function AuthFilesSection({
                   id="rt-login-input"
                   value={rtLogin.text}
                   placeholder="一行一条，可以是邮箱----密码----x----rt_xxx，也可以只有 rt_xxx"
-                  className={cn("min-h-44 w-full resize-y font-mono text-xs focus-visible:ring-1", rtLogin.error && "border-rose-300 focus-visible:border-rose-400 focus-visible:ring-rose-200")}
+                  className={cn(
+                    "min-h-44 w-full resize-y font-mono text-xs focus-visible:ring-1",
+                    rtLogin.error &&
+                      "border-rose-300 focus-visible:border-rose-400 focus-visible:ring-rose-200",
+                  )}
                   onChange={(event) =>
                     setRtLogin((current) =>
-                      current ? { ...current, text: event.target.value, error: null } : current,
+                      current
+                        ? { ...current, text: event.target.value, error: null }
+                        : current,
                     )
                   }
                 />
@@ -2808,18 +3456,33 @@ function AuthFilesSection({
                 <TableBody>
                   {rtLogin.rows.map((row) => (
                     <TableRow key={row.id}>
-                      <TableCell className="px-3 py-2 text-muted-foreground">#{row.lineNumber}</TableCell>
+                      <TableCell className="px-3 py-2 text-muted-foreground">
+                        #{row.lineNumber}
+                      </TableCell>
                       <TableCell className="max-w-[280px] px-3 py-2">
-                        <div className="truncate font-medium" title={row.result?.email ?? row.email ?? row.sourceLine}>
-                          {row.result?.email ?? row.email ?? maskRefreshToken(row.refreshToken)}
+                        <div
+                          className="truncate font-medium"
+                          title={
+                            row.result?.email ?? row.email ?? row.sourceLine
+                          }
+                        >
+                          {row.result?.email ??
+                            row.email ??
+                            maskRefreshToken(row.refreshToken)}
                         </div>
-                        <div className="truncate text-xs text-muted-foreground" title={row.result?.fileName ?? row.sourceLine}>
+                        <div
+                          className="truncate text-xs text-muted-foreground"
+                          title={row.result?.fileName ?? row.sourceLine}
+                        >
                           {row.result?.fileName ?? row.sourceLine}
                         </div>
                       </TableCell>
                       {rtLogin.rows.some((item) => item.proxyId !== null) ? (
                         <TableCell className="max-w-[160px] px-3 py-2">
-                          <div className="truncate text-xs text-muted-foreground" title={row.proxyName ?? undefined}>
+                          <div
+                            className="truncate text-xs text-muted-foreground"
+                            title={row.proxyName ?? undefined}
+                          >
                             {row.proxyName ?? "-"}
                           </div>
                         </TableCell>
@@ -2827,19 +3490,31 @@ function AuthFilesSection({
                       <TableCell className="max-w-[240px] px-3 py-2">
                         <span
                           title={row.error ?? undefined}
-                          className={cn("inline-flex items-center gap-1.5 text-xs font-medium", rtLoginStatusClass(row.status))}
+                          className={cn(
+                            "inline-flex items-center gap-1.5 text-xs font-medium",
+                            rtLoginStatusClass(row.status),
+                          )}
                         >
-                          {row.status === "logging-in" ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
+                          {row.status === "logging-in" ? (
+                            <Loader2 className="h-3 w-3 animate-spin" />
+                          ) : null}
                           {rtLoginStatusLabel(row.status)}
                         </span>
                         {row.error ? (
-                          <span className="ml-2 inline-block max-w-[150px] truncate align-bottom text-xs text-muted-foreground" title={row.error}>
+                          <span
+                            className="ml-2 inline-block max-w-[150px] truncate align-bottom text-xs text-muted-foreground"
+                            title={row.error}
+                          >
                             {row.error}
                           </span>
                         ) : null}
                       </TableCell>
                       <TableCell className="px-3 py-2">
-                        {row.result ? <SubscriptionBadge value={row.result.planType} /> : <span className="text-muted-foreground">-</span>}
+                        {row.result ? (
+                          <SubscriptionBadge value={row.result.planType} />
+                        ) : (
+                          <span className="text-muted-foreground">-</span>
+                        )}
                       </TableCell>
                       <TableCell className="px-3 py-2 text-right">
                         {row.status === "failed" ? (
@@ -2865,7 +3540,10 @@ function AuthFilesSection({
             <Button
               type="button"
               variant="outline"
-              disabled={rtLogin?.stage === "processing" || rtLogin?.stage === "uploading"}
+              disabled={
+                rtLogin?.stage === "processing" ||
+                rtLogin?.stage === "uploading"
+              }
               onClick={() => setRtLogin(null)}
             >
               取消
@@ -2876,7 +3554,8 @@ function AuthFilesSection({
                 !rtLogin ||
                 rtLogin.stage === "processing" ||
                 rtLogin.stage === "uploading" ||
-                (rtLogin.stage === "review" && rtLogin.rows.every((row) => row.status !== "success"))
+                (rtLogin.stage === "review" &&
+                  rtLogin.rows.every((row) => row.status !== "success"))
               }
               onClick={() => {
                 if (!rtLogin) {
@@ -2891,7 +3570,8 @@ function AuthFilesSection({
                 }
               }}
             >
-              {rtLogin?.stage === "processing" || rtLogin?.stage === "uploading" ? (
+              {rtLogin?.stage === "processing" ||
+              rtLogin?.stage === "uploading" ? (
                 <Loader2 className="h-4 w-4 animate-spin" />
               ) : null}
               {rtLoginConfirmLabel(rtLogin)}
@@ -2912,7 +3592,8 @@ function AuthFilesSection({
           <DialogHeader>
             <DialogTitle>Session JSON</DialogTitle>
             <DialogDescription>
-              粘贴 GPTSession2CPAandSub2API 使用的 ChatGPT Session JSON，转换后添加到 {sessionJson?.instance.name ?? "当前 CPA"}。
+              粘贴 GPTSession2CPAandSub2API 使用的 ChatGPT Session
+              JSON，转换后添加到 {sessionJson?.instance.name ?? "当前 CPA"}。
             </DialogDescription>
           </DialogHeader>
           <div className="grid gap-2">
@@ -2924,16 +3605,20 @@ function AuthFilesSection({
               placeholder='{"user":{"email":"mark@example.com"},"expires":"2026-08-06T14:29:36.155Z","account":{"id":"...","planType":"plus"},"accessToken":"...","sessionToken":"..."}'
               className={cn(
                 "max-h-[45vh] min-h-56 resize-y overflow-auto font-mono text-xs",
-                sessionJson?.error && "border-rose-300 focus-visible:border-rose-400 focus-visible:ring-rose-200",
+                sessionJson?.error &&
+                  "border-rose-300 focus-visible:border-rose-400 focus-visible:ring-rose-200",
               )}
               onChange={(event) =>
                 setSessionJson((current) =>
-                  current ? { ...current, text: event.target.value, error: null } : current,
+                  current
+                    ? { ...current, text: event.target.value, error: null }
+                    : current,
                 )
               }
             />
             <div className="text-xs text-muted-foreground">
-              支持单个 Session JSON，也支持包含多个 session 对象的数组或嵌套 JSON。
+              支持单个 Session JSON，也支持包含多个 session 对象的数组或嵌套
+              JSON。
             </div>
             {sessionJson?.error ? (
               <div className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
@@ -2976,7 +3661,8 @@ function AuthFilesSection({
           <DialogHeader>
             <DialogTitle>OAuth登录</DialogTitle>
             <DialogDescription>
-              {oauthLogin?.instance.name ?? "当前 CPA"} 的 Codex OAuth 登录链接。
+              {oauthLogin?.instance.name ?? "当前 CPA"} 的 Codex OAuth
+              登录链接。
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
@@ -3003,7 +3689,11 @@ function AuthFilesSection({
                       disabled={!oauthLogin.authUrl}
                       onClick={() => {
                         if (oauthLogin.authUrl) {
-                          window.open(oauthLogin.authUrl, "_blank", "noopener,noreferrer");
+                          window.open(
+                            oauthLogin.authUrl,
+                            "_blank",
+                            "noopener,noreferrer",
+                          );
                         }
                       }}
                     >
@@ -3030,7 +3720,9 @@ function AuthFilesSection({
                     disabled={oauthLogin.submitting}
                     onChange={(event) =>
                       setOauthLogin((current) =>
-                        current ? { ...current, callbackUrl: event.target.value } : current,
+                        current
+                          ? { ...current, callbackUrl: event.target.value }
+                          : current,
                       )
                     }
                   />
@@ -3077,7 +3769,9 @@ function AuthFilesSection({
       >
         <DialogContent className="sm:max-w-2xl">
           <DialogHeader>
-            <DialogTitle>{exchangeDialog?.mode === "move" ? "移动账号" : "取号"}</DialogTitle>
+            <DialogTitle>
+              {exchangeDialog?.mode === "move" ? "移动账号" : "取号"}
+            </DialogTitle>
             <DialogDescription>
               {exchangeDialog?.instance.name ?? "当前 CPA"} 的 Auth 文件。
             </DialogDescription>
@@ -3090,10 +3784,18 @@ function AuthFilesSection({
                   <select
                     id="exchange-target-cpa"
                     value={exchangeDialog.targetCpaInstanceId}
-                    disabled={exchangeDialog.submitting || exchangeMoveOptions.length === 0}
+                    disabled={
+                      exchangeDialog.submitting ||
+                      exchangeMoveOptions.length === 0
+                    }
                     onChange={(event) =>
                       setExchangeDialog((current) =>
-                        current ? { ...current, targetCpaInstanceId: event.target.value } : current,
+                        current
+                          ? {
+                              ...current,
+                              targetCpaInstanceId: event.target.value,
+                            }
+                          : current,
                       )
                     }
                     className="h-9 rounded-md border border-input bg-background px-3 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:opacity-50"
@@ -3105,7 +3807,9 @@ function AuthFilesSection({
                     ))}
                   </select>
                   {exchangeMoveOptions.length === 0 ? (
-                    <div className="text-sm text-muted-foreground">没有其他已启用 CPA 可移动。</div>
+                    <div className="text-sm text-muted-foreground">
+                      没有其他已启用 CPA 可移动。
+                    </div>
                   ) : null}
                 </div>
               ) : null}
@@ -3117,7 +3821,9 @@ function AuthFilesSection({
                     type="button"
                     size="xs"
                     variant="outline"
-                    disabled={exchangeDialog.submitting || exchangeAvailableCount === 0}
+                    disabled={
+                      exchangeDialog.submitting || exchangeAvailableCount === 0
+                    }
                     onClick={() => quickSelectExchangeRows(count)}
                   >
                     选{count}
@@ -3131,8 +3837,13 @@ function AuthFilesSection({
                 <label className="flex items-center gap-2 border-b bg-muted/35 px-3 py-2 text-sm font-medium">
                   <Checkbox
                     checked={exchangeAllSelected}
-                    disabled={exchangeDialog.submitting || exchangeDialog.rows.length === 0}
-                    onCheckedChange={(checked) => setAllExchangeRowsSelected(Boolean(checked))}
+                    disabled={
+                      exchangeDialog.submitting ||
+                      exchangeDialog.rows.length === 0
+                    }
+                    onCheckedChange={(checked) =>
+                      setAllExchangeRowsSelected(Boolean(checked))
+                    }
                   />
                   全选
                   <span className="ml-auto text-xs font-normal text-muted-foreground">
@@ -3141,7 +3852,9 @@ function AuthFilesSection({
                 </label>
                 <div className="max-h-[45vh] overflow-auto">
                   {exchangeDialog.rows.length === 0 ? (
-                    <div className="px-3 py-8 text-center text-sm text-muted-foreground">暂无数据</div>
+                    <div className="px-3 py-8 text-center text-sm text-muted-foreground">
+                      暂无数据
+                    </div>
                   ) : (
                     exchangeDialog.rows.map((row) => (
                       <label
@@ -3151,7 +3864,9 @@ function AuthFilesSection({
                         <Checkbox
                           checked={exchangeDialog.selectedIds.includes(row.id)}
                           disabled={exchangeDialog.submitting}
-                          onCheckedChange={(checked) => updateExchangeSelection(row.id, Boolean(checked))}
+                          onCheckedChange={(checked) =>
+                            updateExchangeSelection(row.id, Boolean(checked))
+                          }
                         />
                         <SubscriptionBadge value={row.subscriptionType} />
                         <span className="min-w-0 flex-1">
@@ -3188,7 +3903,8 @@ function AuthFilesSection({
                   !exchangeDialog ||
                   exchangeDialog.submitting ||
                   exchangeSelectedCount === 0 ||
-                  (exchangeDialog.mode === "move" && !exchangeDialog.targetCpaInstanceId)
+                  (exchangeDialog.mode === "move" &&
+                    !exchangeDialog.targetCpaInstanceId)
                 }
                 onClick={() => void submitExchangeDialog()}
               >
@@ -3208,10 +3924,15 @@ function AuthFilesSection({
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{bulkExceptionTarget?.title ?? "批量操作"}</DialogTitle>
+            <DialogTitle>
+              {bulkExceptionTarget?.title ?? "批量操作"}
+            </DialogTitle>
             <DialogDescription>
-              确认对 {bulkExceptionTarget?.instance.name ?? "这个 CPA"} 的 {bulkExceptionTarget?.authFileIds.length ?? 0} 个
-              {bulkExceptionTarget?.subject ?? "账号"}执行{bulkExceptionTarget?.confirmVerb ?? "操作"}吗？操作会调用 CPA 接口并在完成后刷新该 CPA。
+              确认对 {bulkExceptionTarget?.instance.name ?? "这个 CPA"} 的{" "}
+              {bulkExceptionTarget?.authFileIds.length ?? 0} 个
+              {bulkExceptionTarget?.subject ?? "账号"}执行
+              {bulkExceptionTarget?.confirmVerb ?? "操作"}吗？操作会调用 CPA
+              接口并在完成后刷新该 CPA。
             </DialogDescription>
           </DialogHeader>
           {bulkExceptionTarget?.action === "delete" ? (
@@ -3221,23 +3942,35 @@ function AuthFilesSection({
           ) : null}
           {bulkExceptionTarget?.action === "portalExceptions" ? (
             <p className="text-sm text-muted-foreground">
-              清理会先保存认证文件到异常账号池，再从 CPA 中移除认证文件和本地账号记录。
+              清理会先保存认证文件到异常账号池，再从 CPA
+              中移除认证文件和本地账号记录。
             </p>
           ) : null}
           <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => setBulkExceptionTarget(null)}>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setBulkExceptionTarget(null)}
+            >
               取消
             </Button>
             <Button
               type="button"
               variant={
-                bulkExceptionTarget?.action === "delete" || bulkExceptionTarget?.action === "portalExceptions"
+                bulkExceptionTarget?.action === "delete" ||
+                bulkExceptionTarget?.action === "portalExceptions"
                   ? "destructive"
                   : "default"
               }
-              disabled={!bulkExceptionTarget || bulkExceptionTarget.authFileIds.length === 0}
+              disabled={
+                !bulkExceptionTarget ||
+                bulkExceptionTarget.authFileIds.length === 0
+              }
               onClick={() => {
-                if (!bulkExceptionTarget || bulkExceptionTarget.authFileIds.length === 0) {
+                if (
+                  !bulkExceptionTarget ||
+                  bulkExceptionTarget.authFileIds.length === 0
+                ) {
                   return;
                 }
                 const target = bulkExceptionTarget;
@@ -3261,6 +3994,1171 @@ function AuthFilesSection({
   );
 }
 
+type CandidateAuthFileQuotaRow = {
+  id: number;
+  fileName: string;
+  email: string | null;
+  available: boolean;
+  quotaStatus: AccountQuotaState | "pending";
+  quotaStatusLabel: string;
+  subscriptionType: string | null;
+  usage5hPercent: number | null;
+  usageWeekPercent: number | null;
+  usage5hResetAt: string | null;
+  usageWeekResetAt: string | null;
+  exception: string | null;
+  refreshedAt: string | null;
+  createdAt: string;
+  lastRefresh: string | null;
+  expired: string | null;
+  refreshToken: string | null;
+};
+
+function CandidatePoolSection({
+  rows,
+  instances,
+  nowMs,
+  refreshing,
+  refreshingMode,
+  onUploadJsonFiles,
+  onRefreshQuotas,
+  onExportJsonFiles,
+  onMoveToCpa,
+  onRefreshTokens,
+  onRefreshSelectedQuotas,
+}: {
+  rows: CandidateAuthFile[];
+  instances: CpaInstance[];
+  nowMs: number;
+  refreshing: boolean;
+  refreshingMode: CandidateQuotaRefreshMode | null;
+  onUploadJsonFiles: (
+    files: CpaJsonUploadFile[],
+  ) => Promise<CpaJsonUploadResult | null>;
+  onRefreshQuotas: (refreshToken: boolean) => Promise<void>;
+  onExportJsonFiles: (
+    authFileIds: number[],
+    deleteAfterExport: boolean,
+  ) => Promise<void>;
+  onMoveToCpa: (
+    authFileIds: number[],
+    targetCpaInstanceId: number,
+  ) => Promise<void>;
+  onRefreshTokens: (authFileIds: number[]) => Promise<{
+    processed: number;
+    failed: number;
+    rotated: number;
+  }>;
+  onRefreshSelectedQuotas: (
+    authFileIds: number[],
+    refreshToken: boolean,
+  ) => Promise<{
+    processed: number;
+    failed: number;
+  }>;
+}) {
+  const [openUploadMenu, setOpenUploadMenu] = useState(false);
+  const [openBatchMenu, setOpenBatchMenu] = useState(false);
+  const [jsonContentDialog, setJsonContentDialog] = useState<{
+    text: string;
+    submitting: boolean;
+    error: string | null;
+  } | null>(null);
+  const [selectedIds, setSelectedIds] = useState<number[]>([]);
+  const [batchAction, setBatchAction] = useState<
+    | "export"
+    | "exportAndDelete"
+    | "move"
+    | "refreshToken"
+    | "refreshQuotaWithRt"
+    | "refreshQuotaWithoutRt"
+    | null
+  >(null);
+  const [moveDialog, setMoveDialog] = useState<{
+    authFileIds: number[];
+    targetCpaInstanceId: string;
+    submitting: boolean;
+  } | null>(null);
+  const uploadMenuRef = useRef<HTMLDivElement | null>(null);
+  const batchMenuRef = useRef<HTMLDivElement | null>(null);
+  const jsonInputRef = useRef<HTMLInputElement | null>(null);
+  const tableRows = useMemo(() => buildCandidatePoolRows(rows), [rows]);
+  const selectedIdSet = useMemo(() => new Set(selectedIds), [selectedIds]);
+  const visibleIds = useMemo(() => tableRows.map((row) => row.id), [tableRows]);
+  const visibleIdSet = useMemo(() => new Set(visibleIds), [visibleIds]);
+  const selectedVisibleIds = useMemo(
+    () => selectedIds.filter((id) => visibleIdSet.has(id)),
+    [selectedIds, visibleIdSet],
+  );
+  const selectedVisibleCount = selectedVisibleIds.length;
+  const allVisibleSelected =
+    visibleIds.length > 0 && selectedVisibleCount === visibleIds.length;
+  const activeRows = tableRows.filter((row) => row.quotaStatus !== "pending");
+  const average5hRemaining = averageRemainingPercent(
+    activeRows.map((row) => row.usage5hPercent),
+  );
+  const averageWeekRemaining = averageRemainingPercent(
+    activeRows.map((row) => row.usageWeekPercent),
+  );
+  const availableCount = tableRows.filter(
+    (row) => row.quotaStatus === "available",
+  ).length;
+  const limitedCount = tableRows.filter(
+    (row) => row.quotaStatus === "limited",
+  ).length;
+  const exceptionCount = tableRows.filter(
+    (row) => row.quotaStatus === "exception",
+  ).length;
+  const pendingCount = tableRows.filter(
+    (row) => row.quotaStatus === "pending",
+  ).length;
+
+  useEffect(() => {
+    if (!openUploadMenu) {
+      return;
+    }
+
+    function closeOnOutsidePointerDown(event: PointerEvent) {
+      const target = event.target;
+      if (target instanceof Node && uploadMenuRef.current?.contains(target)) {
+        return;
+      }
+      setOpenUploadMenu(false);
+    }
+
+    document.addEventListener("pointerdown", closeOnOutsidePointerDown);
+    return () =>
+      document.removeEventListener("pointerdown", closeOnOutsidePointerDown);
+  }, [openUploadMenu]);
+
+  useEffect(() => {
+    if (!openBatchMenu) {
+      return;
+    }
+
+    function closeOnOutsidePointerDown(event: PointerEvent) {
+      const target = event.target;
+      if (target instanceof Node && batchMenuRef.current?.contains(target)) {
+        return;
+      }
+      setOpenBatchMenu(false);
+    }
+
+    document.addEventListener("pointerdown", closeOnOutsidePointerDown);
+    return () =>
+      document.removeEventListener("pointerdown", closeOnOutsidePointerDown);
+  }, [openBatchMenu]);
+
+  function toggleCandidateSelected(id: number, selected: boolean) {
+    setSelectedIds((current) => {
+      if (selected) {
+        return current.includes(id) ? current : [...current, id];
+      }
+      return current.filter((item) => item !== id);
+    });
+  }
+
+  function toggleAllCandidates(selected: boolean) {
+    setSelectedIds(selected ? visibleIds : []);
+  }
+
+  async function handleExportSelected(deleteAfterExport: boolean) {
+    if (selectedVisibleIds.length === 0) {
+      toast.info("请先选择候补账号");
+      return;
+    }
+
+    setBatchAction(deleteAfterExport ? "exportAndDelete" : "export");
+    try {
+      await onExportJsonFiles(selectedVisibleIds, deleteAfterExport);
+      toast.success(deleteAfterExport ? "已导出并删除候补账号" : "已导出候补账号");
+      if (deleteAfterExport) {
+        setSelectedIds([]);
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBatchAction(null);
+    }
+  }
+
+  function openMoveDialog() {
+    if (selectedVisibleIds.length === 0) {
+      toast.info("请先选择候补账号");
+      return;
+    }
+
+    setMoveDialog({
+      authFileIds: selectedVisibleIds,
+      targetCpaInstanceId: instances[0] ? String(instances[0].id) : "",
+      submitting: false,
+    });
+  }
+
+  async function submitMoveDialog() {
+    if (!moveDialog) {
+      return;
+    }
+    const targetCpaInstanceId = Number(moveDialog.targetCpaInstanceId);
+    if (!Number.isInteger(targetCpaInstanceId) || targetCpaInstanceId <= 0) {
+      toast.error("请选择目标 CPA");
+      return;
+    }
+
+    setMoveDialog((current) => current ? { ...current, submitting: true } : current);
+    setBatchAction("move");
+    try {
+      await onMoveToCpa(moveDialog.authFileIds, targetCpaInstanceId);
+      setSelectedIds([]);
+      setMoveDialog(null);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setMoveDialog((current) =>
+        current ? { ...current, submitting: false } : current,
+      );
+      toast.error(message);
+    } finally {
+      setBatchAction(null);
+    }
+  }
+
+  async function handleRefreshSelectedTokens() {
+    if (selectedVisibleIds.length === 0) {
+      toast.info("请先选择候补账号");
+      return;
+    }
+
+    setBatchAction("refreshToken");
+    try {
+      const result = await onRefreshTokens(selectedVisibleIds);
+      if (result.failed > 0) {
+        toast.warning(
+          `已刷 RT：${result.processed} 个成功，${result.failed} 个失败，${result.rotated} 个 RT 已轮换`,
+        );
+      } else {
+        toast.success(`已刷 RT ${result.processed} 个，${result.rotated} 个 RT 已轮换`);
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBatchAction(null);
+    }
+  }
+
+  async function handleRefreshSelectedQuotas(refreshToken: boolean) {
+    if (selectedVisibleIds.length === 0) {
+      toast.info("请先选择候补账号");
+      return;
+    }
+
+    setBatchAction(refreshToken ? "refreshQuotaWithRt" : "refreshQuotaWithoutRt");
+    try {
+      const result = await onRefreshSelectedQuotas(selectedVisibleIds, refreshToken);
+      if (result.failed > 0) {
+        toast.warning(
+          `选中账号配额已刷新：${result.processed} 个成功，${result.failed} 个异常`,
+        );
+      } else {
+        toast.success(`选中账号配额已刷新 ${result.processed} 个`);
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBatchAction(null);
+    }
+  }
+
+  async function handleJsonInputChange(event: ChangeEvent<HTMLInputElement>) {
+    const input = event.currentTarget;
+    const files = Array.from(input.files ?? []);
+    input.value = "";
+    if (files.length === 0) {
+      return;
+    }
+
+    const uploadFiles: CpaJsonUploadFile[] = [];
+    for (const file of files) {
+      if (!file.name.toLowerCase().endsWith(".json")) {
+        toast.error(`${file.name} 不是 JSON 文件`);
+        return;
+      }
+
+      let payload: unknown;
+      try {
+        payload = JSON.parse(await file.text()) as unknown;
+      } catch {
+        toast.error(`${file.name} 解析失败，请确认文件内容是合法 JSON`);
+        return;
+      }
+
+      if (!isJsonObject(payload)) {
+        toast.error(`${file.name} 必须是 JSON 对象`);
+        return;
+      }
+
+      uploadFiles.push({ fileName: file.name, payload });
+    }
+
+    try {
+      const result = await onUploadJsonFiles(uploadFiles);
+      const uploaded = result?.uploaded ?? uploadFiles.length;
+      const failed = result?.failed ?? 0;
+      if (failed > 0) {
+        toast.warning(`已导入 ${uploaded} 个候补账号，${failed} 个失败`);
+      } else {
+        toast.success(`已导入 ${uploaded} 个候补账号`);
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function submitJsonContent() {
+    if (!jsonContentDialog) {
+      return;
+    }
+
+    let uploadFiles: CpaJsonUploadFile[];
+    try {
+      uploadFiles = parseCandidateJsonContent(jsonContentDialog.text);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setJsonContentDialog((current) =>
+        current ? { ...current, error: message } : current,
+      );
+      toast.error(message);
+      return;
+    }
+
+    setJsonContentDialog((current) =>
+      current ? { ...current, submitting: true, error: null } : current,
+    );
+    try {
+      const result = await onUploadJsonFiles(uploadFiles);
+      const uploaded = result?.uploaded ?? uploadFiles.length;
+      const failed = result?.failed ?? 0;
+      if (failed > 0) {
+        toast.warning(`已导入 ${uploaded} 个候补账号，${failed} 个失败`);
+      } else {
+        toast.success(`已导入 ${uploaded} 个候补账号`);
+      }
+      setJsonContentDialog(null);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setJsonContentDialog((current) =>
+        current ? { ...current, submitting: false, error: message } : current,
+      );
+      toast.error(message);
+    }
+  }
+
+  return (
+    <>
+      <section className="space-y-3">
+        <input
+          ref={jsonInputRef}
+          type="file"
+          accept="application/json,.json"
+          multiple
+          className="hidden"
+          onChange={(event) => void handleJsonInputChange(event)}
+        />
+
+        <div className="relative overflow-hidden rounded-md border bg-card">
+          <div className="space-y-2 border-b bg-muted/35 px-3 py-2">
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
+              <h2 className="text-sm font-semibold">候补号池</h2>
+              <Badge variant="secondary">{tableRows.length}</Badge>
+              {selectedVisibleIds.length > 0 ? (
+                <>
+                  <Badge variant="outline">已选 {selectedVisibleIds.length}</Badge>
+                  <div ref={batchMenuRef} className="relative">
+                    <Button
+                      type="button"
+                      size="icon-xs"
+                      variant="outline"
+                      aria-label="批量操作"
+                      aria-expanded={openBatchMenu}
+                      disabled={batchAction !== null}
+                      onClick={() => setOpenBatchMenu((open) => !open)}
+                    >
+                      {batchAction !== null ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <MoreHorizontal className="h-3.5 w-3.5" />
+                      )}
+                    </Button>
+                    {openBatchMenu ? (
+                      <div className="absolute left-0 top-8 z-[70] min-w-56 rounded-md border bg-popover p-1 text-popover-foreground shadow-md">
+                        <button
+                          type="button"
+                          role="menuitem"
+                          className="flex w-full items-center gap-1.5 rounded px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground"
+                          onClick={() => {
+                            setOpenBatchMenu(false);
+                            void handleExportSelected(false);
+                          }}
+                        >
+                          <Download className="h-3 w-3" />
+                          导出JSON
+                        </button>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          className="flex w-full items-center gap-1.5 rounded px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground"
+                          onClick={() => {
+                            setOpenBatchMenu(false);
+                            void handleExportSelected(true);
+                          }}
+                        >
+                          <Download className="h-3 w-3" />
+                          导出JSON并删除
+                        </button>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          disabled={instances.length === 0}
+                          title={instances.length === 0 ? "没有已启用 CPA" : undefined}
+                          className="flex w-full items-center gap-1.5 rounded px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-50"
+                          onClick={() => {
+                            setOpenBatchMenu(false);
+                            openMoveDialog();
+                          }}
+                        >
+                          <ArrowLeftRight className="h-3 w-3" />
+                          移动到CPA
+                        </button>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          className="flex w-full items-center gap-1.5 rounded px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground"
+                          onClick={() => {
+                            setOpenBatchMenu(false);
+                            void handleRefreshSelectedTokens();
+                          }}
+                        >
+                          <RefreshCw className="h-3 w-3" />
+                          刷 RT
+                        </button>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          className="flex w-full items-center gap-1.5 rounded px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground"
+                          onClick={() => {
+                            setOpenBatchMenu(false);
+                            void handleRefreshSelectedQuotas(true);
+                          }}
+                        >
+                          <RefreshCw className="h-3 w-3" />
+                          刷新配额（按需刷新RT）
+                        </button>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          className="flex w-full items-center gap-1.5 rounded px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground"
+                          onClick={() => {
+                            setOpenBatchMenu(false);
+                            void handleRefreshSelectedQuotas(false);
+                          }}
+                        >
+                          <RefreshCw className="h-3 w-3" />
+                          刷新配额（不刷新RT）
+                        </button>
+                      </div>
+                    ) : null}
+                  </div>
+                </>
+              ) : null}
+              <Button
+                type="button"
+                size="xs"
+                variant="outline"
+                disabled={refreshing || tableRows.length === 0}
+                onClick={() => void onRefreshQuotas(true)}
+              >
+                <RefreshCw
+                  className={cn(
+                    "h-3.5 w-3.5",
+                    refreshingMode === "withRt" && "animate-spin",
+                  )}
+                />
+                刷新配额（按需刷新RT）
+              </Button>
+              <Button
+                type="button"
+                size="xs"
+                variant="outline"
+                disabled={refreshing || tableRows.length === 0}
+                onClick={() => void onRefreshQuotas(false)}
+              >
+                <RefreshCw
+                  className={cn(
+                    "h-3.5 w-3.5",
+                    refreshingMode === "withoutRt" && "animate-spin",
+                  )}
+                />
+                刷新配额（不刷新RT）
+              </Button>
+              <div ref={uploadMenuRef} className="relative">
+                <Button
+                  type="button"
+                  size="xs"
+                  variant="outline"
+                  aria-expanded={openUploadMenu}
+                  onClick={() => setOpenUploadMenu((open) => !open)}
+                >
+                  <Plus className="h-3 w-3" />
+                  补号
+                </Button>
+                {openUploadMenu ? (
+                  <div className="absolute left-0 top-8 z-[60] min-w-32 rounded-md border bg-popover p-1 text-popover-foreground shadow-md">
+                    <button
+                      type="button"
+                      className="flex w-full items-center gap-1.5 rounded px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground"
+                      onClick={() => {
+                        setOpenUploadMenu(false);
+                        jsonInputRef.current?.click();
+                      }}
+                    >
+                      <FileKey2 className="h-3 w-3" />
+                      JSON 文件
+                    </button>
+                    <button
+                      type="button"
+                      className="flex w-full items-center gap-1.5 rounded px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground"
+                      onClick={() => {
+                        setOpenUploadMenu(false);
+                        setJsonContentDialog({
+                          text: "",
+                          submitting: false,
+                          error: null,
+                        });
+                      }}
+                    >
+                      <FileKey2 className="h-3 w-3" />
+                      JSON 内容
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            </div>
+            <div className="flex w-full flex-wrap items-center gap-x-2 gap-y-1 border-t border-border/50 pt-1.5 text-xs text-muted-foreground">
+              <HeaderAverageMeter label="5h均剩余" value={average5hRemaining} />
+              <HeaderAverageMeter
+                label="周均剩余"
+                value={averageWeekRemaining}
+              />
+              <span className="text-emerald-700">{availableCount} 可用</span>
+              {limitedCount > 0 ? (
+                <span className="text-amber-700">{limitedCount} 限额</span>
+              ) : null}
+              {exceptionCount > 0 ? (
+                <span className="text-rose-700">{exceptionCount} 异常</span>
+              ) : null}
+              {pendingCount > 0 ? <span>{pendingCount} 待刷新</span> : null}
+            </div>
+          </div>
+
+          <CandidatePoolTable
+            rows={tableRows}
+            nowMs={nowMs}
+            selectedIds={selectedIdSet}
+            allSelected={allVisibleSelected}
+            onToggleSelected={toggleCandidateSelected}
+            onToggleAll={toggleAllCandidates}
+          />
+
+          {refreshing ? (
+            <div className="absolute inset-0 z-40 flex items-center justify-center bg-background/70 backdrop-blur-[1px]">
+              <div className="flex items-center gap-2 rounded-md border bg-card px-3 py-2 text-sm font-medium shadow-sm">
+                <Loader2 className="h-4 w-4 animate-spin text-primary" />
+                正在刷新配额
+              </div>
+            </div>
+          ) : null}
+        </div>
+      </section>
+
+      <Dialog
+        open={jsonContentDialog !== null}
+        onOpenChange={(open) => {
+          if (!open && !jsonContentDialog?.submitting) {
+            setJsonContentDialog(null);
+          }
+        }}
+      >
+        <DialogContent className="sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>JSON 内容</DialogTitle>
+            <DialogDescription>
+              支持单个 JSON、JSON 数组，或一行一个 JSON 的 JSONL。内容会导入到
+              Nexus 候补号池。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-2">
+            <Label htmlFor="candidate-json-content">JSON 内容</Label>
+            <Textarea
+              id="candidate-json-content"
+              value={jsonContentDialog?.text ?? ""}
+              disabled={jsonContentDialog?.submitting}
+              placeholder='{"type":"codex","email":"name@example.com","refresh_token":"rt_xxx"}'
+              className={cn(
+                "max-h-[45vh] min-h-56 resize-y overflow-auto font-mono text-xs",
+                jsonContentDialog?.error &&
+                  "border-rose-300 focus-visible:border-rose-400 focus-visible:ring-rose-200",
+              )}
+              onChange={(event) =>
+                setJsonContentDialog((current) =>
+                  current
+                    ? { ...current, text: event.target.value, error: null }
+                    : current,
+                )
+              }
+            />
+            <div className="text-xs text-muted-foreground">
+              JSONL 示例：每一行是一条 CPA JSON 或 sub2api JSON。
+            </div>
+            {jsonContentDialog?.error ? (
+              <div className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+                {jsonContentDialog.error}
+              </div>
+            ) : null}
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={jsonContentDialog?.submitting}
+              onClick={() => setJsonContentDialog(null)}
+            >
+              取消
+            </Button>
+            <Button
+              type="button"
+              disabled={
+                !jsonContentDialog ||
+                jsonContentDialog.submitting ||
+                !jsonContentDialog.text.trim()
+              }
+              onClick={() => void submitJsonContent()}
+            >
+              {jsonContentDialog?.submitting ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : null}
+              确定
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={moveDialog !== null}
+        onOpenChange={(open) => {
+          if (!open && !moveDialog?.submitting) {
+            setMoveDialog(null);
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>移动到CPA</DialogTitle>
+            <DialogDescription>
+              将已选择的 {moveDialog?.authFileIds.length ?? 0} 个候补账号上传到目标 CPA，成功后从候补号池删除。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-2">
+            <Label htmlFor="candidate-move-target">目标 CPA</Label>
+            <select
+              id="candidate-move-target"
+              value={moveDialog?.targetCpaInstanceId ?? ""}
+              disabled={moveDialog?.submitting || instances.length === 0}
+              onChange={(event) =>
+                setMoveDialog((current) =>
+                  current
+                    ? { ...current, targetCpaInstanceId: event.target.value }
+                    : current,
+                )
+              }
+              className="h-9 rounded-md border border-input bg-background px-3 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:opacity-50"
+            >
+              {instances.map((instance) => (
+                <option key={instance.id} value={instance.id}>
+                  {instance.name}
+                </option>
+              ))}
+            </select>
+            {instances.length === 0 ? (
+              <div className="text-sm text-muted-foreground">没有已启用 CPA 可移动。</div>
+            ) : null}
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={moveDialog?.submitting}
+              onClick={() => setMoveDialog(null)}
+            >
+              取消
+            </Button>
+            <Button
+              type="button"
+              disabled={
+                !moveDialog ||
+                moveDialog.submitting ||
+                !moveDialog.targetCpaInstanceId ||
+                instances.length === 0
+              }
+              onClick={() => void submitMoveDialog()}
+            >
+              {moveDialog?.submitting ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : null}
+              确定
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}
+
+function CandidatePoolTable({
+  rows,
+  nowMs,
+  selectedIds,
+  allSelected,
+  onToggleSelected,
+  onToggleAll,
+}: {
+  rows: CandidateAuthFileQuotaRow[];
+  nowMs: number;
+  selectedIds: Set<number>;
+  allSelected: boolean;
+  onToggleSelected: (id: number, selected: boolean) => void;
+  onToggleAll: (selected: boolean) => void;
+}) {
+  return (
+    <div className="overflow-x-auto">
+      <div className="max-h-[calc(100vh-220px)] min-w-[920px] max-w-none overflow-y-auto">
+        <table className="w-full min-w-[920px] table-fixed caption-bottom text-sm">
+          <colgroup>
+            <col style={{ width: 36 }} />
+            <col />
+            <col style={{ width: 116 }} />
+            <col style={{ width: 96 }} />
+            <col style={{ width: 96 }} />
+            <col style={{ width: 72 }} />
+            <col style={{ width: 80 }} />
+            <col style={{ width: 88 }} />
+            <col style={{ width: 96 }} />
+            <col style={{ width: 96 }} />
+          </colgroup>
+          <TableHeader>
+            <TableRow className="h-8">
+              <TableHead className="sticky top-0 z-10 w-9 bg-card px-2 py-1 text-xs shadow-[0_1px_0_var(--border)]">
+                <Checkbox
+                  checked={allSelected}
+                  disabled={rows.length === 0}
+                  aria-label="选择全部候补账号"
+                  onCheckedChange={(checked) => onToggleAll(Boolean(checked))}
+                />
+              </TableHead>
+              <TableHead className="sticky top-0 z-10 bg-card px-3 py-1 text-xs shadow-[0_1px_0_var(--border)]">
+                账号
+              </TableHead>
+              <TableHead className="sticky top-0 z-10 w-[116px] bg-card px-2 py-1 text-xs shadow-[0_1px_0_var(--border)]">
+                Refresh Token
+              </TableHead>
+              <TableHead className="sticky top-0 z-10 w-24 bg-card px-2 py-1 text-xs shadow-[0_1px_0_var(--border)]">
+                <CompactPercentHeader windowLabel="5h" />
+              </TableHead>
+              <TableHead className="sticky top-0 z-10 w-24 bg-card px-2 py-1 text-xs shadow-[0_1px_0_var(--border)]">
+                <CompactPercentHeader windowLabel="周" />
+              </TableHead>
+              <TableHead className="sticky top-0 z-10 w-[72px] bg-card px-2 py-1 text-xs shadow-[0_1px_0_var(--border)]">
+                状态
+              </TableHead>
+              <TableHead className="sticky top-0 z-10 w-20 bg-card px-2 py-1 text-xs shadow-[0_1px_0_var(--border)]">
+                刷新
+              </TableHead>
+              <TableHead className="sticky top-0 z-10 w-[88px] bg-card px-2 py-1 text-xs shadow-[0_1px_0_var(--border)]">
+                add_at
+              </TableHead>
+              <TableHead className="sticky top-0 z-10 w-24 bg-card px-2 py-1 text-xs shadow-[0_1px_0_var(--border)]">
+                last_refresh
+              </TableHead>
+              <TableHead className="sticky top-0 z-10 w-24 bg-card px-2 py-1 text-xs shadow-[0_1px_0_var(--border)]">
+                expired
+              </TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {rows.length === 0 ? (
+              <TableRow>
+                <TableCell
+                  colSpan={10}
+                  className="h-24 text-center text-sm text-muted-foreground"
+                >
+                  暂无候补账号
+                </TableCell>
+              </TableRow>
+            ) : (
+              rows.map((row) => (
+                <TableRow key={row.id} className="h-9">
+                  <TableCell className="w-9 px-2 py-1">
+                    <Checkbox
+                      checked={selectedIds.has(row.id)}
+                      aria-label={`选择 ${row.email ?? row.fileName}`}
+                      onCheckedChange={(checked) =>
+                        onToggleSelected(row.id, Boolean(checked))
+                      }
+                    />
+                  </TableCell>
+                  <TableCell className="px-3 py-1">
+                    <div className="flex min-w-0 items-center gap-2">
+                      <span
+                        className={cn(
+                          "h-2 w-2 shrink-0 rounded-full",
+                          row.quotaStatus === "pending"
+                            ? "bg-muted-foreground/50"
+                            : row.quotaStatus === "available"
+                              ? "bg-emerald-500"
+                              : row.quotaStatus === "limited"
+                                ? "bg-amber-500"
+                                : "bg-rose-500",
+                        )}
+                      />
+                      <SubscriptionBadge value={row.subscriptionType} />
+                      <HoverCopyTooltip
+                        className="min-w-0 flex-1"
+                        items={candidateTooltipItems(row)}
+                      >
+                        <span className="block truncate text-xs font-medium">
+                          {row.email ?? "-"}
+                        </span>
+                      </HoverCopyTooltip>
+                    </div>
+                  </TableCell>
+                  <TableCell className="w-[116px] px-2 py-1">
+                    <HoverCopyTooltip
+                      className="block max-w-[6.5rem]"
+                      items={candidateRefreshTokenTooltipItems(row)}
+                    >
+                      <span className="block truncate font-mono text-[11px] text-muted-foreground">
+                        {row.refreshToken ? maskRefreshToken(row.refreshToken) : "-"}
+                      </span>
+                    </HoverCopyTooltip>
+                  </TableCell>
+                  <TableCell className="w-24 px-2 py-1">
+                    <CompactPercentBar
+                      value={row.usage5hPercent}
+                      resetAt={row.usage5hResetAt}
+                      nowMs={nowMs}
+                    />
+                  </TableCell>
+                  <TableCell className="w-24 px-2 py-1">
+                    <CompactPercentBar
+                      value={row.usageWeekPercent}
+                      resetAt={row.usageWeekResetAt}
+                      nowMs={nowMs}
+                    />
+                  </TableCell>
+                  <TableCell className="w-[72px] px-2 py-1">
+                    <span
+                      title={row.quotaStatusLabel}
+                      className={cn(
+                        "block truncate text-xs",
+                        row.quotaStatus === "exception"
+                          ? "text-rose-700"
+                          : row.quotaStatus === "limited"
+                            ? "text-amber-700"
+                            : "text-muted-foreground",
+                      )}
+                    >
+                      {row.quotaStatusLabel}
+                    </span>
+                  </TableCell>
+                  <TableCell className="w-20 whitespace-nowrap px-2 py-1 text-xs text-muted-foreground">
+                    <span title={formatDate(row.refreshedAt)}>
+                      {formatRelativeTime(row.refreshedAt, nowMs)}
+                    </span>
+                  </TableCell>
+                  <CandidateTimeCell value={row.createdAt} />
+                  <CandidateTimeCell value={row.lastRefresh} />
+                  <CandidateTimeCell value={row.expired} />
+                </TableRow>
+              ))
+            )}
+          </TableBody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function buildCandidatePoolRows(rows: CandidateAuthFile[]) {
+  const mapped = rows.map((row): CandidateAuthFileQuotaRow => {
+    const pending = !row.lastQuotaRefreshedAt;
+    const authMetadata = candidateAuthJsonMetadata(row.rawJson);
+    const quotaStatus = pending
+      ? null
+      : resolveAccountQuotaStatus({
+          disabled: false,
+          available: row.available,
+          exception: candidateQuotaException(row.statusMessage),
+          rawJson: row.quotaRawJson,
+        });
+
+    return {
+      id: row.id,
+      fileName: row.fileName,
+      email: row.email,
+      available: row.available,
+      quotaStatus: pending ? "pending" : (quotaStatus?.state ?? "available"),
+      quotaStatusLabel: pending
+        ? "待刷新"
+        : (quotaStatus?.label ?? row.status ?? "可用"),
+      subscriptionType: row.subscriptionType,
+      usage5hPercent: row.usage5hPercent,
+      usageWeekPercent: row.usageWeekPercent,
+      usage5hResetAt: row.usage5hResetAt,
+      usageWeekResetAt: row.usageWeekResetAt,
+      exception: candidateQuotaException(row.statusMessage),
+      refreshedAt: row.lastQuotaRefreshedAt,
+      createdAt: row.createdAt,
+      lastRefresh: authMetadata.lastRefresh,
+      expired: authMetadata.expired,
+      refreshToken: authMetadata.refreshToken,
+    };
+  });
+
+  return sortAccountRows(
+    mapped.map((row) => ({
+      ...row,
+      quotaStatus: row.quotaStatus === "pending" ? undefined : row.quotaStatus,
+    })),
+  ).map((row) => ({
+    ...row,
+    quotaStatus:
+      mapped.find((item) => item.id === row.id)?.quotaStatus ?? "pending",
+  }));
+}
+
+function candidateQuotaException(statusMessage: string | null) {
+  if (
+    statusMessage === "Refresh Token 已轮换" ||
+    statusMessage === "Refresh Token 未轮换"
+  ) {
+    return null;
+  }
+  return statusMessage;
+}
+
+function CandidateTimeCell({ value }: { value: string | null }) {
+  return (
+    <TableCell className="w-24 whitespace-nowrap px-2 py-1 text-xs text-muted-foreground">
+      <span title={formatCandidateTimestamp(value)}>
+        {formatDate(value)}
+      </span>
+    </TableCell>
+  );
+}
+
+function candidateAuthJsonMetadata(rawJson: string) {
+  try {
+    const parsed = JSON.parse(rawJson) as unknown;
+    if (!isJsonObject(parsed)) {
+      return { lastRefresh: null, expired: null, refreshToken: null };
+    }
+
+    return {
+      lastRefresh:
+        jsonContentString(parsed.last_refresh) ??
+        jsonContentString(parsed.lastRefresh) ??
+        null,
+      expired:
+        jsonContentString(parsed.expired) ??
+        jsonContentString(parsed.expires_at) ??
+        jsonContentString(parsed.expiresAt) ??
+        null,
+      refreshToken:
+        jsonContentString(parsed.refresh_token) ??
+        jsonContentString(parsed.refreshToken) ??
+        null,
+    };
+  } catch {
+    return { lastRefresh: null, expired: null, refreshToken: null };
+  }
+}
+
+function candidateTooltipItems(row: CandidateAuthFileQuotaRow) {
+  return compactTooltipItems([
+    { label: "邮箱", value: row.email ?? "" },
+    { label: "文件名", value: row.fileName },
+    { label: "添加时间", value: formatDate(row.createdAt) },
+  ]);
+}
+
+function candidateRefreshTokenTooltipItems(row: CandidateAuthFileQuotaRow) {
+  return compactTooltipItems([
+    { label: "RT", value: row.refreshToken ?? "" },
+  ]);
+}
+
+function parseCandidateJsonContent(text: string): CpaJsonUploadFile[] {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    throw new Error("请先粘贴 JSON 内容");
+  }
+
+  const payloads = parseCandidateJsonPayloads(trimmed);
+  if (payloads.length === 0) {
+    throw new Error("没有可导入的 JSON 内容");
+  }
+
+  return payloads.map((payload, index) => ({
+    fileName: candidateJsonContentFileName(payload, index + 1),
+    payload,
+  }));
+}
+
+function parseCandidateJsonPayloads(text: string): Record<string, unknown>[] {
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    const items = Array.isArray(parsed) ? parsed : [parsed];
+    return items.map((item, index) => {
+      if (!isJsonObject(item)) {
+        throw new Error(`第 ${index + 1} 条必须是 JSON 对象`);
+      }
+      return item;
+    });
+  } catch (error) {
+    if (!(error instanceof SyntaxError)) {
+      throw error;
+    }
+  }
+
+  return parseCandidateJsonStream(text);
+}
+
+function parseCandidateJsonStream(text: string): Record<string, unknown>[] {
+  const payloads: Record<string, unknown>[] = [];
+  let startIndex: number | null = null;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+
+    if (startIndex === null) {
+      if (/\s/.test(char)) {
+        continue;
+      }
+      if (char !== "{" && char !== "[") {
+        throw new Error(`第 ${lineNumberAt(text, index)} 行不是合法 JSON`);
+      }
+      startIndex = index;
+      depth = 1;
+      inString = false;
+      escaped = false;
+      continue;
+    }
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === "\"") {
+      inString = true;
+      continue;
+    }
+    if (char === "{" || char === "[") {
+      depth += 1;
+      continue;
+    }
+    if (char !== "}" && char !== "]") {
+      continue;
+    }
+
+    depth -= 1;
+    if (depth === 0) {
+      const segment = text.slice(startIndex, index + 1);
+      payloads.push(parseCandidateJsonSegment(segment, text, startIndex));
+      startIndex = null;
+    }
+  }
+
+  if (startIndex !== null) {
+    throw new Error(`第 ${lineNumberAt(text, startIndex)} 行开始的 JSON 没有结束`);
+  }
+
+  return payloads;
+}
+
+function parseCandidateJsonSegment(
+  segment: string,
+  source: string,
+  startIndex: number,
+) {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(segment) as unknown;
+  } catch {
+    throw new Error(`第 ${lineNumberAt(source, startIndex)} 行开始的 JSON 不合法`);
+  }
+
+  if (!isJsonObject(parsed)) {
+    throw new Error(`第 ${lineNumberAt(source, startIndex)} 行开始的 JSON 必须是对象`);
+  }
+
+  return parsed;
+}
+
+function lineNumberAt(text: string, index: number) {
+  return text.slice(0, index).split(/\r?\n/).length;
+}
+
+function candidateJsonContentFileName(
+  payload: Record<string, unknown>,
+  index: number,
+) {
+  const email = candidateJsonContentEmail(payload);
+  return email
+    ? buildAutoAuthFileName(email)
+    : `json-content-${String(index).padStart(3, "0")}.json`;
+}
+
+function candidateJsonContentEmail(payload: Record<string, unknown>) {
+  return (
+    jsonContentString(payload.email) ??
+    jsonContentString(payload.account_email) ??
+    jsonContentString(payload.username) ??
+    candidateNestedEmail(payload.credentials) ??
+    candidateNestedEmail(payload.user) ??
+    candidateNestedEmail(payload.account) ??
+    jsonContentString(payload.name)?.match(rtLoginEmailRegex)?.[0] ??
+    null
+  );
+}
+
+function candidateNestedEmail(value: unknown) {
+  return isJsonObject(value)
+    ? (jsonContentString(value.email) ?? jsonContentString(value.account_email))
+    : null;
+}
+
+function jsonContentString(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
 function ExceptionAuthFilesSection({
   rows,
   instances,
@@ -3276,7 +5174,9 @@ function ExceptionAuthFilesSection({
   onDelete: (id: number) => Promise<void>;
   onMove: (id: number, targetCpaInstanceId: number) => Promise<void>;
 }) {
-  const [deleteTarget, setDeleteTarget] = useState<ExceptionAuthFile | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<ExceptionAuthFile | null>(
+    null,
+  );
   const [clearOpen, setClearOpen] = useState(false);
   const [moveTarget, setMoveTarget] = useState<ExceptionAuthFile | null>(null);
   const [moveTargetInstanceId, setMoveTargetInstanceId] = useState("");
@@ -3307,14 +5207,28 @@ function ExceptionAuthFilesSection({
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div>
             <h2 className="text-base font-semibold">异常账号池</h2>
-            <p className="text-sm text-muted-foreground">共 {rows.length} 个异常账号</p>
+            <p className="text-sm text-muted-foreground">
+              共 {rows.length} 个异常账号
+            </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <Button type="button" size="sm" variant="outline" disabled={rows.length === 0} onClick={onExport}>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={rows.length === 0}
+              onClick={onExport}
+            >
               <Download className="h-4 w-4" />
               导出
             </Button>
-            <Button type="button" size="sm" variant="destructive" disabled={rows.length === 0} onClick={() => setClearOpen(true)}>
+            <Button
+              type="button"
+              size="sm"
+              variant="destructive"
+              disabled={rows.length === 0}
+              onClick={() => setClearOpen(true)}
+            >
               <Trash2 className="h-4 w-4" />
               删除全部
             </Button>
@@ -3336,18 +5250,31 @@ function ExceptionAuthFilesSection({
             <TableBody>
               {rows.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={6} className="h-24 text-center text-muted-foreground">
+                  <TableCell
+                    colSpan={6}
+                    className="h-24 text-center text-muted-foreground"
+                  >
                     暂无异常账号
                   </TableCell>
                 </TableRow>
               ) : (
                 rows.map((row) => (
                   <TableRow key={row.id}>
-                    <TableCell className="max-w-[16rem] truncate font-medium">{row.email ?? "-"}</TableCell>
-                    <TableCell className="max-w-[18rem] truncate">{row.fileName}</TableCell>
-                    <TableCell className="whitespace-nowrap">{formatDate(row.createdAt)}</TableCell>
-                    <TableCell className="max-w-[20rem] truncate">{row.lastError ?? "-"}</TableCell>
-                    <TableCell className="max-w-[14rem] truncate">{row.sourceCpaInstanceName}</TableCell>
+                    <TableCell className="max-w-[16rem] truncate font-medium">
+                      {row.email ?? "-"}
+                    </TableCell>
+                    <TableCell className="max-w-[18rem] truncate">
+                      {row.fileName}
+                    </TableCell>
+                    <TableCell className="whitespace-nowrap">
+                      {formatDate(row.createdAt)}
+                    </TableCell>
+                    <TableCell className="max-w-[20rem] truncate">
+                      {row.lastError ?? "-"}
+                    </TableCell>
+                    <TableCell className="max-w-[14rem] truncate">
+                      {row.sourceCpaInstanceName}
+                    </TableCell>
                     <TableCell className="text-right">
                       <div className="flex justify-end gap-2">
                         <Button
@@ -3382,10 +5309,18 @@ function ExceptionAuthFilesSection({
         <DialogContent>
           <DialogHeader>
             <DialogTitle>删除全部异常账号</DialogTitle>
-            <DialogDescription>确定要清空异常账号池中的 {rows.length} 条记录吗？</DialogDescription>
+            <DialogDescription>
+              确定要清空异常账号池中的 {rows.length} 条记录吗？
+            </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => setClearOpen(false)}>取消</Button>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setClearOpen(false)}
+            >
+              取消
+            </Button>
             <Button
               type="button"
               variant="destructive"
@@ -3400,16 +5335,27 @@ function ExceptionAuthFilesSection({
         </DialogContent>
       </Dialog>
 
-      <Dialog open={deleteTarget !== null} onOpenChange={(open) => !open && setDeleteTarget(null)}>
+      <Dialog
+        open={deleteTarget !== null}
+        onOpenChange={(open) => !open && setDeleteTarget(null)}
+      >
         <DialogContent>
           <DialogHeader>
             <DialogTitle>删除异常账号</DialogTitle>
             <DialogDescription>
-              确定要删除 {deleteTarget?.email ?? deleteTarget?.fileName ?? "这条记录"} 吗？这个操作只删除异常账号池记录。
+              确定要删除{" "}
+              {deleteTarget?.email ?? deleteTarget?.fileName ?? "这条记录"}{" "}
+              吗？这个操作只删除异常账号池记录。
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => setDeleteTarget(null)}>取消</Button>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setDeleteTarget(null)}
+            >
+              取消
+            </Button>
             <Button
               type="button"
               variant="destructive"
@@ -3427,11 +5373,16 @@ function ExceptionAuthFilesSection({
         </DialogContent>
       </Dialog>
 
-      <Dialog open={moveTarget !== null} onOpenChange={(open) => !open && setMoveTarget(null)}>
+      <Dialog
+        open={moveTarget !== null}
+        onOpenChange={(open) => !open && setMoveTarget(null)}
+      >
         <DialogContent>
           <DialogHeader>
             <DialogTitle>移动异常账号</DialogTitle>
-            <DialogDescription>选择目标 CPA。确认后会上传认证文件到目标 CPA，并从异常账号池移除。</DialogDescription>
+            <DialogDescription>
+              选择目标 CPA。确认后会上传认证文件到目标 CPA，并从异常账号池移除。
+            </DialogDescription>
           </DialogHeader>
           <div className="space-y-2">
             <Label htmlFor="exception-auth-target-cpa">目标 CPA</Label>
@@ -3442,13 +5393,25 @@ function ExceptionAuthFilesSection({
               onChange={(event) => setMoveTargetInstanceId(event.target.value)}
             >
               {instances.map((instance) => (
-                <option key={instance.id} value={instance.id}>{instance.name}</option>
+                <option key={instance.id} value={instance.id}>
+                  {instance.name}
+                </option>
               ))}
             </select>
           </div>
           <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => setMoveTarget(null)}>取消</Button>
-            <Button type="button" disabled={!moveTargetInstanceId || submitting} onClick={() => void submitMove()}>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setMoveTarget(null)}
+            >
+              取消
+            </Button>
+            <Button
+              type="button"
+              disabled={!moveTargetInstanceId || submitting}
+              onClick={() => void submitMove()}
+            >
               {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
               移动
             </Button>
@@ -3502,7 +5465,10 @@ function CompactAuthFileTable({
   onRefreshQuota: (id: number) => Promise<void>;
 }) {
   const [openActionRowId, setOpenActionRowId] = useState<number | null>(null);
-  const [actionMenuPosition, setActionMenuPosition] = useState({ left: 0, top: 0 });
+  const [actionMenuPosition, setActionMenuPosition] = useState({
+    left: 0,
+    top: 0,
+  });
   const actionTriggerRef = useRef<HTMLButtonElement | null>(null);
   const actionMenuRef = useRef<HTMLDivElement | null>(null);
 
@@ -3516,24 +5482,24 @@ function CompactAuthFileTable({
       if (target instanceof Node && actionMenuRef.current?.contains(target)) {
         return;
       }
-      if (target instanceof Node && actionTriggerRef.current?.contains(target)) {
+      if (
+        target instanceof Node &&
+        actionTriggerRef.current?.contains(target)
+      ) {
         return;
       }
       setOpenActionRowId(null);
     }
 
     document.addEventListener("pointerdown", closeOnOutsidePointerDown);
-    return () => document.removeEventListener("pointerdown", closeOnOutsidePointerDown);
+    return () =>
+      document.removeEventListener("pointerdown", closeOnOutsidePointerDown);
   }, [openActionRowId]);
 
   return (
     <div className="overflow-x-auto">
-      <div
-        className="max-h-[calc(100vh-260px)] min-w-[704px] max-w-none overflow-y-auto"
-      >
-        <table
-          className="w-full min-w-[704px] table-fixed caption-bottom text-sm"
-        >
+      <div className="max-h-[calc(100vh-260px)] min-w-[704px] max-w-none overflow-y-auto">
+        <table className="w-full min-w-[704px] table-fixed caption-bottom text-sm">
           <colgroup>
             <col />
             <col style={{ width: 96 }} />
@@ -3545,23 +5511,36 @@ function CompactAuthFileTable({
           </colgroup>
           <TableHeader>
             <TableRow className="h-8">
-              <TableHead className="sticky top-0 z-10 bg-card px-3 py-1 text-xs shadow-[0_1px_0_var(--border)]">账号</TableHead>
+              <TableHead className="sticky top-0 z-10 bg-card px-3 py-1 text-xs shadow-[0_1px_0_var(--border)]">
+                账号
+              </TableHead>
               <TableHead className="sticky top-0 z-10 w-24 bg-card px-2 py-1 text-xs shadow-[0_1px_0_var(--border)]">
                 <CompactPercentHeader windowLabel="5h" />
               </TableHead>
               <TableHead className="sticky top-0 z-10 w-24 bg-card px-2 py-1 text-xs shadow-[0_1px_0_var(--border)]">
                 <CompactPercentHeader windowLabel="周" />
               </TableHead>
-              <TableHead className="sticky top-0 z-10 w-16 bg-card px-2 py-1 text-xs shadow-[0_1px_0_var(--border)]">代理</TableHead>
-              <TableHead className="sticky top-0 z-10 w-16 bg-card px-2 py-1 text-xs shadow-[0_1px_0_var(--border)]">状态</TableHead>
-              <TableHead className="sticky top-0 z-10 w-20 bg-card px-2 py-1 text-xs shadow-[0_1px_0_var(--border)]">刷新</TableHead>
-              <TableHead className="sticky top-0 z-10 w-11 bg-card px-2 py-1 text-right text-xs shadow-[0_1px_0_var(--border)]">操作</TableHead>
+              <TableHead className="sticky top-0 z-10 w-16 bg-card px-2 py-1 text-xs shadow-[0_1px_0_var(--border)]">
+                代理
+              </TableHead>
+              <TableHead className="sticky top-0 z-10 w-16 bg-card px-2 py-1 text-xs shadow-[0_1px_0_var(--border)]">
+                状态
+              </TableHead>
+              <TableHead className="sticky top-0 z-10 w-20 bg-card px-2 py-1 text-xs shadow-[0_1px_0_var(--border)]">
+                刷新
+              </TableHead>
+              <TableHead className="sticky top-0 z-10 w-11 bg-card px-2 py-1 text-right text-xs shadow-[0_1px_0_var(--border)]">
+                操作
+              </TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {rows.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={7} className="h-16 text-center text-sm text-muted-foreground">
+                <TableCell
+                  colSpan={7}
+                  className="h-16 text-center text-sm text-muted-foreground"
+                >
                   暂无数据
                 </TableCell>
               </TableRow>
@@ -3569,7 +5548,10 @@ function CompactAuthFileTable({
               rows.map((row) => (
                 <TableRow
                   key={row.id}
-                  className={cn("h-9", row.disabled && "bg-muted/30 text-muted-foreground")}
+                  className={cn(
+                    "h-9",
+                    row.disabled && "bg-muted/30 text-muted-foreground",
+                  )}
                 >
                   <TableCell className="px-3 py-1">
                     <div className="flex min-w-0 items-center gap-2">
@@ -3597,10 +5579,18 @@ function CompactAuthFileTable({
                     </div>
                   </TableCell>
                   <TableCell className="w-24 px-2 py-1">
-                    <CompactPercentBar value={row.usage5hPercent} resetAt={row.usage5hResetAt} nowMs={nowMs} />
+                    <CompactPercentBar
+                      value={row.usage5hPercent}
+                      resetAt={row.usage5hResetAt}
+                      nowMs={nowMs}
+                    />
                   </TableCell>
                   <TableCell className="w-24 px-2 py-1">
-                    <CompactPercentBar value={row.usageWeekPercent} resetAt={row.usageWeekResetAt} nowMs={nowMs} />
+                    <CompactPercentBar
+                      value={row.usageWeekPercent}
+                      resetAt={row.usageWeekResetAt}
+                      nowMs={nowMs}
+                    />
                   </TableCell>
                   <TableCell className="w-16 px-2 py-1">
                     <HoverCopyTooltip
@@ -3633,11 +5623,11 @@ function CompactAuthFileTable({
                     </span>
                   </TableCell>
                   <TableCell className="w-11 whitespace-nowrap px-2 py-1 text-right">
-                    <div
-                      className="relative flex justify-end"
-                    >
+                    <div className="relative flex justify-end">
                       <Button
-                        ref={openActionRowId === row.id ? actionTriggerRef : null}
+                        ref={
+                          openActionRowId === row.id ? actionTriggerRef : null
+                        }
                         size="icon-xs"
                         variant="ghost"
                         aria-label={`${row.email ?? row.fileName} 操作`}
@@ -3648,27 +5638,32 @@ function CompactAuthFileTable({
                             setOpenActionRowId(null);
                             return;
                           }
-	                          const rect = event.currentTarget.getBoundingClientRect();
-	                          setActionMenuPosition(
-	                            getFloatingMenuPosition(rect, {
-	                              menuWidth: 128,
-	                              menuHeight: 202,
-	                              viewportWidth: window.innerWidth,
-	                              viewportHeight: window.innerHeight,
-	                            }),
-	                          );
-	                          setOpenActionRowId(row.id);
-	                        }}
+                          const rect =
+                            event.currentTarget.getBoundingClientRect();
+                          setActionMenuPosition(
+                            getFloatingMenuPosition(rect, {
+                              menuWidth: 128,
+                              menuHeight: 202,
+                              viewportWidth: window.innerWidth,
+                              viewportHeight: window.innerHeight,
+                            }),
+                          );
+                          setOpenActionRowId(row.id);
+                        }}
                       >
                         <MoreHorizontal className="h-4 w-4" />
                       </Button>
-                      {openActionRowId === row.id && typeof document !== "undefined"
+                      {openActionRowId === row.id &&
+                      typeof document !== "undefined"
                         ? createPortal(
                             <div
                               ref={actionMenuRef}
                               role="menu"
                               className="fixed z-[120] min-w-32 rounded-md border bg-popover p-1 text-popover-foreground shadow-md"
-                              style={{ left: actionMenuPosition.left, top: actionMenuPosition.top }}
+                              style={{
+                                left: actionMenuPosition.left,
+                                top: actionMenuPosition.top,
+                              }}
                             >
                               <button
                                 type="button"
@@ -3820,7 +5815,11 @@ function HoverCopyTooltip({
       <span
         ref={triggerRef}
         tabIndex={hasValue ? 0 : -1}
-        className={cn("inline-block min-w-0", hasValue && "cursor-default", className)}
+        className={cn(
+          "inline-block min-w-0",
+          hasValue && "cursor-default",
+          className,
+        )}
         onMouseEnter={openTooltip}
         onMouseLeave={scheduleClose}
         onFocus={openTooltip}
@@ -3832,7 +5831,11 @@ function HoverCopyTooltip({
         ? createPortal(
             <div
               className="fixed z-[100] max-w-sm rounded-md border bg-popover p-2 text-popover-foreground shadow-lg"
-              style={{ left: position.left, top: position.top, transform: "translateY(-100%)" }}
+              style={{
+                left: position.left,
+                top: position.top,
+                transform: "translateY(-100%)",
+              }}
               onMouseEnter={clearCloseTimer}
               onMouseLeave={scheduleClose}
             >
@@ -3919,7 +5922,9 @@ function parseRtLoginInput(text: string) {
 
       const segments = line.split("----").map((segment) => segment.trim());
       const refreshToken =
-        segments.find((segment) => rtLoginRefreshTokenRegex.test(segment))?.match(rtLoginRefreshTokenRegex)?.[0] ??
+        segments
+          .find((segment) => rtLoginRefreshTokenRegex.test(segment))
+          ?.match(rtLoginRefreshTokenRegex)?.[0] ??
         line.match(rtLoginRefreshTokenRegex)?.[0] ??
         "";
       if (!refreshToken) {
@@ -4014,11 +6019,21 @@ function HeaderAverageMeter({
   const tone = quotaRemainingTone(value);
 
   return (
-    <span className={cn("inline-flex items-center gap-1.5 whitespace-nowrap font-medium", tone.text)}>
+    <span
+      className={cn(
+        "inline-flex items-center gap-1.5 whitespace-nowrap font-medium",
+        tone.text,
+      )}
+    >
       <span>{label}</span>
-      <span className="w-8 text-right tabular-nums">{formatPercent(value)}</span>
+      <span className="w-8 text-right tabular-nums">
+        {formatPercent(value)}
+      </span>
       <span className="h-1.5 w-12 overflow-hidden rounded bg-background ring-1 ring-border/60">
-        <span className={cn("block h-full rounded", tone.bar)} style={{ width: `${width}%` }} />
+        <span
+          className={cn("block h-full rounded", tone.bar)}
+          style={{ width: `${width}%` }}
+        />
       </span>
     </span>
   );
@@ -4048,13 +6063,12 @@ function mergeAuthFilesWithQuotas(
       (file.email ? quotaByEmail.get(file.email.toLowerCase()) : undefined) ??
       null;
     const disabled = Boolean(file.disabled);
-    const available = disabled ? false : quota?.available ?? file.available;
+    const available = disabled ? false : (quota?.available ?? file.available);
     const exception = disabled
       ? null
       : quota
         ? quota.exception
-        : file.statusMessage ??
-          (available ? null : file.status ?? "异常");
+        : (file.statusMessage ?? (available ? null : (file.status ?? "异常")));
     const quotaStatus = resolveAccountQuotaStatus({
       disabled,
       available,
@@ -4068,7 +6082,7 @@ function mergeAuthFilesWithQuotas(
       fileName: file.fileName,
       email: quota?.email ?? file.email,
       proxyUrl,
-      proxyName: proxyUrl ? proxyNameByUrl.get(proxyUrl) ?? null : null,
+      proxyName: proxyUrl ? (proxyNameByUrl.get(proxyUrl) ?? null) : null,
       disabled,
       available,
       quotaStatus: quotaStatus.state,
@@ -4094,7 +6108,11 @@ function proxyUrlFromRawAuthJson(rawJson: string | null) {
 
   try {
     const parsed = JSON.parse(rawJson) as unknown;
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      Array.isArray(parsed)
+    ) {
       return null;
     }
 
@@ -4131,7 +6149,8 @@ function CompactPercentBar({
   resetAt: string | null;
   nowMs: number;
 }) {
-  const remaining = value === null ? null : Math.max(0, Math.min(100, 100 - value));
+  const remaining =
+    value === null ? null : Math.max(0, Math.min(100, 100 - value));
   const width = remaining ?? 0;
   const tone = quotaRemainingTone(remaining);
   const resetLabel = formatQuotaResetCountdown(resetAt, nowMs);
@@ -4142,7 +6161,10 @@ function CompactPercentBar({
       title={quotaResetTitle(resetAt)}
     >
       <div className="h-1.5 rounded bg-muted">
-        <div className={cn("h-1.5 rounded", tone.bar)} style={{ width: `${width}%` }} />
+        <div
+          className={cn("h-1.5 rounded", tone.bar)}
+          style={{ width: `${width}%` }}
+        />
       </div>
       <div className="flex items-center justify-between gap-2 leading-none">
         <span className={cn("text-[11px] tabular-nums", tone.text)}>
@@ -4232,7 +6254,9 @@ function ProxySection(props: {
       <div className="flex flex-col gap-2.5 rounded-md border bg-card p-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <div className="font-medium">代理列表</div>
-          <div className="text-sm text-muted-foreground">配置代理名称、URL、允许使用账号数和允许应用的 CPA 实例。</div>
+          <div className="text-sm text-muted-foreground">
+            配置代理名称、URL、允许使用账号数和允许应用的 CPA 实例。
+          </div>
         </div>
         <div className="flex flex-wrap gap-2">
           <Button
@@ -4265,35 +6289,68 @@ function ProxySection(props: {
       <Dialog open={props.open} onOpenChange={props.setOpen}>
         <DialogContent className="sm:max-w-xl">
           <DialogHeader>
-            <DialogTitle>{props.editingId ? "编辑代理" : "添加代理"}</DialogTitle>
+            <DialogTitle>
+              {props.editingId ? "编辑代理" : "添加代理"}
+            </DialogTitle>
             <DialogDescription>
-              设置代理名称、地址、允许被多少账号使用，以及这个代理可用于哪些 CPA 实例。
+              设置代理名称、地址、允许被多少账号使用，以及这个代理可用于哪些 CPA
+              实例。
             </DialogDescription>
           </DialogHeader>
 
           <form id={formId} onSubmit={props.onSubmit} className="grid gap-4">
             <Field label="代理名称">
-              <Input value={props.form.name} onChange={(event) => props.setForm({ ...props.form, name: event.target.value })} placeholder="美国出口 01" required />
+              <Input
+                value={props.form.name}
+                onChange={(event) =>
+                  props.setForm({ ...props.form, name: event.target.value })
+                }
+                placeholder="美国出口 01"
+                required
+              />
             </Field>
             <Field label="代理URL">
-              <Input value={props.form.url} onChange={(event) => props.setForm({ ...props.form, url: event.target.value })} placeholder="http://user:pass@host:port" required />
+              <Input
+                value={props.form.url}
+                onChange={(event) =>
+                  props.setForm({ ...props.form, url: event.target.value })
+                }
+                placeholder="http://user:pass@host:port"
+                required
+              />
             </Field>
-            <NumberField label="允许被多少账号使用" value={props.form.maxAuthFiles} onChange={(maxAuthFiles) => props.setForm({ ...props.form, maxAuthFiles })} />
+            <NumberField
+              label="允许被多少账号使用"
+              value={props.form.maxAuthFiles}
+              onChange={(maxAuthFiles) =>
+                props.setForm({ ...props.form, maxAuthFiles })
+              }
+            />
             <label className="flex items-center gap-2 text-sm">
-              <Switch checked={props.form.enabled} onCheckedChange={(enabled) => props.setForm({ ...props.form, enabled })} />
+              <Switch
+                checked={props.form.enabled}
+                onCheckedChange={(enabled) =>
+                  props.setForm({ ...props.form, enabled })
+                }
+              />
               启用
             </label>
             <div className="space-y-2">
               <Label>应用CPA</Label>
               <div className="flex max-h-44 flex-wrap gap-3 overflow-auto rounded-md border bg-muted/25 p-3">
                 {props.instances.map((instance) => (
-                  <label key={instance.id} className="flex items-center gap-2 text-sm">
+                  <label
+                    key={instance.id}
+                    className="flex items-center gap-2 text-sm"
+                  >
                     <Checkbox
                       checked={props.form.cpaInstanceIds.includes(instance.id)}
                       onCheckedChange={(checked) => {
                         const ids = checked
                           ? [...props.form.cpaInstanceIds, instance.id]
-                          : props.form.cpaInstanceIds.filter((id) => id !== instance.id);
+                          : props.form.cpaInstanceIds.filter(
+                              (id) => id !== instance.id,
+                            );
                         props.setForm({ ...props.form, cpaInstanceIds: ids });
                       }}
                     />
@@ -4305,7 +6362,11 @@ function ProxySection(props: {
           </form>
 
           <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => props.setOpen(false)}>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => props.setOpen(false)}
+            >
               取消
             </Button>
             <Button type="submit" form={formId}>
@@ -4317,16 +6378,30 @@ function ProxySection(props: {
       </Dialog>
 
       <DataTable
-        headers={["名称", "代理URL", "允许账号数", "启用", "检测", "应用CPA", "操作"]}
+        headers={[
+          "名称",
+          "代理URL",
+          "允许账号数",
+          "启用",
+          "检测",
+          "应用CPA",
+          "操作",
+        ]}
         rows={props.proxies.map((proxy) => [
-          <span key="name" className="font-medium">{proxy.name}</span>,
-          <code key="url" className="text-xs">{proxy.url}</code>,
+          <span key="name" className="font-medium">
+            {proxy.name}
+          </span>,
+          <code key="url" className="text-xs">
+            {proxy.url}
+          </code>,
           proxy.maxAuthFiles,
           <Switch
             key="enabled"
             checked={proxy.enabled}
             aria-label={`${proxy.name} 启用状态`}
-            onCheckedChange={(enabled) => void props.onToggleEnabled(proxy, enabled)}
+            onCheckedChange={(enabled) =>
+              void props.onToggleEnabled(proxy, enabled)
+            }
           />,
           <ProxyCheckBadge
             key="check"
@@ -4335,13 +6410,34 @@ function ProxySection(props: {
           />,
           <AppliedCpaTags
             key="cpa-instances"
-            instances={props.instances.filter((instance) => proxy.cpaInstanceIds.includes(instance.id))}
+            instances={props.instances.filter((instance) =>
+              proxy.cpaInstanceIds.includes(instance.id),
+            )}
           />,
           <div key="actions" className="flex gap-2">
-            <Button size="sm" variant="outline" onClick={() => { props.setEditingId(proxy.id); props.setForm({ name: proxy.name, url: proxy.url, maxAuthFiles: proxy.maxAuthFiles, enabled: proxy.enabled, notes: proxy.notes ?? "", cpaInstanceIds: proxy.cpaInstanceIds }); props.setOpen(true); }}>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => {
+                props.setEditingId(proxy.id);
+                props.setForm({
+                  name: proxy.name,
+                  url: proxy.url,
+                  maxAuthFiles: proxy.maxAuthFiles,
+                  enabled: proxy.enabled,
+                  notes: proxy.notes ?? "",
+                  cpaInstanceIds: proxy.cpaInstanceIds,
+                });
+                props.setOpen(true);
+              }}
+            >
               编辑
             </Button>
-            <Button size="icon" variant="ghost" onClick={() => void props.onDelete(proxy.id)}>
+            <Button
+              size="icon"
+              variant="ghost"
+              onClick={() => void props.onDelete(proxy.id)}
+            >
               <Trash2 className="h-4 w-4" />
             </Button>
           </div>,
@@ -4370,7 +6466,10 @@ function JobsSection({
   const canGoPrevious = runsPagination.page > 1;
   const canGoNext = runsPagination.page < runsPagination.totalPages;
 
-  function updateDraft(job: CronJob, updater: (draft: CronJobDraft) => CronJobDraft) {
+  function updateDraft(
+    job: CronJob,
+    updater: (draft: CronJobDraft) => CronJobDraft,
+  ) {
     setDrafts((current) => {
       const draft = current[job.key] ?? createJobDraft(job);
       return { ...current, [job.key]: updater(draft) };
@@ -4389,11 +6488,21 @@ function JobsSection({
   return (
     <section className="space-y-3">
       <DataTable
-        headers={["任务", "执行频率", "状态", "下次执行", "最近执行", "错误", "操作"]}
+        headers={[
+          "任务",
+          "执行频率",
+          "状态",
+          "下次执行",
+          "最近执行",
+          "错误",
+          "操作",
+        ]}
         rows={jobs.map((job) => {
           const draft = drafts[job.key] ?? createJobDraft(job);
           return [
-            <div key="name" className="font-medium">{job.name}</div>,
+            <div key="name" className="font-medium">
+              {job.name}
+            </div>,
             <JobScheduleEditor
               key="schedule"
               schedule={draft.schedule}
@@ -4408,13 +6517,21 @@ function JobsSection({
             <Switch
               key="enabled"
               checked={draft.enabled}
-              onCheckedChange={(enabled) => updateDraft(job, (current) => ({ ...current, enabled }))}
+              onCheckedChange={(enabled) =>
+                updateDraft(job, (current) => ({ ...current, enabled }))
+              }
             />,
             formatDate(job.nextRunAt),
             formatDate(job.lastRunAt),
-            <span key="error" className="max-w-[280px] truncate text-rose-700">{job.lastError ?? "-"}</span>,
+            <span key="error" className="max-w-[280px] truncate text-rose-700">
+              {job.lastError ?? "-"}
+            </span>,
             <div key="actions" className="flex gap-2">
-              <Button size="sm" variant="outline" onClick={() => void saveDraft(job, draft)}>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => void saveDraft(job, draft)}
+              >
                 <Save className="h-4 w-4" />
                 保存
               </Button>
@@ -4465,8 +6582,14 @@ function JobsSection({
             headers={["任务", "状态", "信息", "开始", "结束"]}
             rows={runs.map((run) => [
               run.jobKey,
-              <StatusBadge key="status" ok={run.status === "success"} label={run.status} />,
-              <span key="message" className="max-w-[420px] truncate">{run.message ?? "-"}</span>,
+              <StatusBadge
+                key="status"
+                ok={run.status === "success"}
+                label={run.status}
+              />,
+              <span key="message" className="max-w-[420px] truncate">
+                {run.message ?? "-"}
+              </span>,
               formatDate(run.startedAt),
               formatDate(run.finishedAt),
             ])}
@@ -4495,7 +6618,14 @@ function JobScheduleEditor({
         <select
           className={cn(compactControlClassName, "w-32")}
           value={schedule.mode}
-          onChange={(event) => onChange(defaultScheduleForMode(event.target.value as CronSimpleMode, schedule))}
+          onChange={(event) =>
+            onChange(
+              defaultScheduleForMode(
+                event.target.value as CronSimpleMode,
+                schedule,
+              ),
+            )
+          }
         >
           {Object.entries(cronModeLabels).map(([mode, label]) => (
             <option key={mode} value={mode}>
@@ -4513,7 +6643,13 @@ function JobScheduleEditor({
               className="h-8 w-20"
               value={schedule.everyMinutes}
               onChange={(event) =>
-                onChange({ ...schedule, everyMinutes: finiteInputNumber(event.currentTarget.valueAsNumber, schedule.everyMinutes) })
+                onChange({
+                  ...schedule,
+                  everyMinutes: finiteInputNumber(
+                    event.currentTarget.valueAsNumber,
+                    schedule.everyMinutes,
+                  ),
+                })
               }
             />
             <span className="text-sm text-muted-foreground">分钟</span>
@@ -4544,7 +6680,13 @@ function JobScheduleEditor({
               className="h-8 w-20"
               value={schedule.minute}
               onChange={(event) =>
-                onChange({ ...schedule, minute: finiteInputNumber(event.currentTarget.valueAsNumber, schedule.minute) })
+                onChange({
+                  ...schedule,
+                  minute: finiteInputNumber(
+                    event.currentTarget.valueAsNumber,
+                    schedule.minute,
+                  ),
+                })
               }
             />
             <span className="text-sm text-muted-foreground">分钟</span>
@@ -4556,7 +6698,9 @@ function JobScheduleEditor({
             type="time"
             className="h-8 w-32"
             value={schedule.time}
-            onChange={(event) => onChange({ ...schedule, time: event.target.value })}
+            onChange={(event) =>
+              onChange({ ...schedule, time: event.target.value })
+            }
           />
         ) : null}
 
@@ -4565,7 +6709,9 @@ function JobScheduleEditor({
             <select
               className={cn(compactControlClassName, "w-24")}
               value={schedule.dayOfWeek}
-              onChange={(event) => onChange({ ...schedule, dayOfWeek: Number(event.target.value) })}
+              onChange={(event) =>
+                onChange({ ...schedule, dayOfWeek: Number(event.target.value) })
+              }
             >
               {weekdayOptions.map((day) => (
                 <option key={day.value} value={day.value}>
@@ -4577,7 +6723,9 @@ function JobScheduleEditor({
               type="time"
               className="h-8 w-32"
               value={schedule.time}
-              onChange={(event) => onChange({ ...schedule, time: event.target.value })}
+              onChange={(event) =>
+                onChange({ ...schedule, time: event.target.value })
+              }
             />
           </>
         ) : null}
@@ -4586,7 +6734,9 @@ function JobScheduleEditor({
           <Input
             className="h-8 w-60 font-mono text-xs"
             value={schedule.cron}
-            onChange={(event) => onChange({ ...schedule, cron: event.target.value })}
+            onChange={(event) =>
+              onChange({ ...schedule, cron: event.target.value })
+            }
             placeholder="*/10 * * * *"
           />
         ) : null}
@@ -4602,25 +6752,44 @@ function JobScheduleEditor({
   );
 }
 
-function defaultScheduleForMode(mode: CronSimpleMode, current: CronSimpleSchedule): CronSimpleSchedule {
+function defaultScheduleForMode(
+  mode: CronSimpleMode,
+  current: CronSimpleSchedule,
+): CronSimpleSchedule {
   switch (mode) {
     case "interval":
-      return current.mode === "interval" ? current : { mode: "interval", everyMinutes: 10 };
+      return current.mode === "interval"
+        ? current
+        : { mode: "interval", everyMinutes: 10 };
     case "hourly":
-      return current.mode === "hourly" ? current : { mode: "hourly", minute: 0 };
+      return current.mode === "hourly"
+        ? current
+        : { mode: "hourly", minute: 0 };
     case "daily":
-      return current.mode === "daily" ? current : { mode: "daily", time: scheduleTimeOrDefault(current) };
+      return current.mode === "daily"
+        ? current
+        : { mode: "daily", time: scheduleTimeOrDefault(current) };
     case "weekly":
-      return current.mode === "weekly" ? current : { mode: "weekly", dayOfWeek: 1, time: scheduleTimeOrDefault(current) };
+      return current.mode === "weekly"
+        ? current
+        : {
+            mode: "weekly",
+            dayOfWeek: 1,
+            time: scheduleTimeOrDefault(current),
+          };
     case "advanced":
-      return current.mode === "advanced" ? current : { mode: "advanced", cron: simpleScheduleToCron(current) };
+      return current.mode === "advanced"
+        ? current
+        : { mode: "advanced", cron: simpleScheduleToCron(current) };
     default:
       return { mode: "advanced", cron: simpleScheduleToCron(current) };
   }
 }
 
 function scheduleTimeOrDefault(schedule: CronSimpleSchedule) {
-  return schedule.mode === "daily" || schedule.mode === "weekly" ? schedule.time : "00:00";
+  return schedule.mode === "daily" || schedule.mode === "weekly"
+    ? schedule.time
+    : "00:00";
 }
 
 function finiteInputNumber(value: number, fallback: number) {
@@ -4654,7 +6823,8 @@ function ProxyCheckBadge({
         className="border-emerald-200 bg-emerald-50 text-emerald-700"
         title={result.message}
       >
-        可用{typeof result.latencyMs === "number" ? ` ${result.latencyMs}ms` : ""}
+        可用
+        {typeof result.latencyMs === "number" ? ` ${result.latencyMs}ms` : ""}
       </Badge>
     );
   }
@@ -4691,21 +6861,32 @@ function AppliedCpaTags({ instances }: { instances: CpaInstance[] }) {
   );
 }
 
-function DataTable({ headers, rows }: { headers: string[]; rows: Array<Array<React.ReactNode>> }) {
+function DataTable({
+  headers,
+  rows,
+}: {
+  headers: string[];
+  rows: Array<Array<React.ReactNode>>;
+}) {
   return (
     <div className="overflow-x-auto rounded-md border bg-card">
       <Table>
         <TableHeader>
           <TableRow>
             {headers.map((header) => (
-              <TableHead key={header} className="whitespace-nowrap">{header}</TableHead>
+              <TableHead key={header} className="whitespace-nowrap">
+                {header}
+              </TableHead>
             ))}
           </TableRow>
         </TableHeader>
         <TableBody>
           {rows.length === 0 ? (
             <TableRow>
-              <TableCell colSpan={headers.length} className="h-24 text-center text-muted-foreground">
+              <TableCell
+                colSpan={headers.length}
+                className="h-24 text-center text-muted-foreground"
+              >
                 暂无数据
               </TableCell>
             </TableRow>
@@ -4713,7 +6894,9 @@ function DataTable({ headers, rows }: { headers: string[]; rows: Array<Array<Rea
             rows.map((row, index) => (
               <TableRow key={index}>
                 {row.map((cell, cellIndex) => (
-                  <TableCell key={cellIndex} className="align-middle">{cell}</TableCell>
+                  <TableCell key={cellIndex} className="align-middle">
+                    {cell}
+                  </TableCell>
                 ))}
               </TableRow>
             ))
@@ -4726,13 +6909,24 @@ function DataTable({ headers, rows }: { headers: string[]; rows: Array<Array<Rea
 
 function StatusBadge({ ok, label }: { ok: boolean; label: string }) {
   return (
-    <Badge className={cn(ok ? "bg-emerald-100 text-emerald-800" : "bg-rose-100 text-rose-800", "hover:bg-current/10")}>
+    <Badge
+      className={cn(
+        ok ? "bg-emerald-100 text-emerald-800" : "bg-rose-100 text-rose-800",
+        "hover:bg-current/10",
+      )}
+    >
       {label}
     </Badge>
   );
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+function Field({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
   return (
     <div className="space-y-2">
       <Label>{label}</Label>
@@ -4741,10 +6935,23 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   );
 }
 
-function NumberField({ label, value, onChange }: { label: string; value: number; onChange: (value: number) => void }) {
+function NumberField({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  onChange: (value: number) => void;
+}) {
   return (
     <Field label={label}>
-      <Input type="number" value={value} min={0} onChange={(event) => onChange(Number(event.target.value))} />
+      <Input
+        type="number"
+        value={value}
+        min={0}
+        onChange={(event) => onChange(Number(event.target.value))}
+      />
     </Field>
   );
 }
@@ -4758,7 +6965,10 @@ async function fetchJson<T>(url: string): Promise<T> {
   return payload as T;
 }
 
-async function mutate<T = { status: string }>(url: string, init: RequestInit): Promise<T> {
+async function mutate<T = { status: string }>(
+  url: string,
+  init: RequestInit,
+): Promise<T> {
   const response = await fetch(url, {
     ...init,
     headers: {
@@ -4775,7 +6985,7 @@ async function mutate<T = { status: string }>(url: string, init: RequestInit): P
 
 async function readFetchError(response: Response) {
   try {
-    const payload = await response.json() as { error?: string };
+    const payload = (await response.json()) as { error?: string };
     return payload.error ?? response.statusText;
   } catch {
     return response.statusText;
@@ -4794,9 +7004,7 @@ function downloadBlob(blob: Blob, fileName: string) {
 }
 
 function csvCell(value: string) {
-  return /[",\n\r]/.test(value)
-    ? `"${value.replaceAll("\"", "\"\"")}"`
-    : value;
+  return /[",\n\r]/.test(value) ? `"${value.replaceAll('"', '""')}"` : value;
 }
 
 function fileNameFromContentDisposition(value: string | null) {
@@ -4837,6 +7045,14 @@ function formatDate(value: string | null) {
     hour: "2-digit",
     minute: "2-digit",
   }).format(new Date(value));
+}
+
+function formatCandidateTimestamp(value: string | null) {
+  if (!value) {
+    return "-";
+  }
+  const timestamp = new Date(value).getTime();
+  return Number.isFinite(timestamp) ? new Date(timestamp).toLocaleString("zh-CN") : value;
 }
 
 function formatRelativeTime(value: string | null, nowMs: number) {
@@ -4973,15 +7189,24 @@ function subscriptionBadgeClass(value: string) {
     enterprise: "border-emerald-300 bg-emerald-50 text-emerald-800",
     team: "border-cyan-300 bg-cyan-50 text-cyan-800",
     pro: "border-amber-300 bg-gradient-to-b from-amber-50 to-amber-100 text-amber-900 shadow-[inset_0_1px_0_rgba(255,255,255,0.85),0_1px_2px_rgba(217,119,6,0.22)]",
-    pro20x: "border-amber-300 bg-gradient-to-b from-amber-50 to-amber-100 text-amber-900 shadow-[inset_0_1px_0_rgba(255,255,255,0.85),0_1px_2px_rgba(217,119,6,0.22)]",
-    "pro-20x": "border-amber-300 bg-gradient-to-b from-amber-50 to-amber-100 text-amber-900 shadow-[inset_0_1px_0_rgba(255,255,255,0.85),0_1px_2px_rgba(217,119,6,0.22)]",
-    pro_20x: "border-amber-300 bg-gradient-to-b from-amber-50 to-amber-100 text-amber-900 shadow-[inset_0_1px_0_rgba(255,255,255,0.85),0_1px_2px_rgba(217,119,6,0.22)]",
-    prolite: "border-yellow-300 bg-gradient-to-b from-yellow-50 to-yellow-100 text-yellow-900 shadow-[inset_0_1px_0_rgba(255,255,255,0.85),0_1px_2px_rgba(202,138,4,0.18)]",
-    "pro-lite": "border-yellow-300 bg-gradient-to-b from-yellow-50 to-yellow-100 text-yellow-900 shadow-[inset_0_1px_0_rgba(255,255,255,0.85),0_1px_2px_rgba(202,138,4,0.18)]",
-    pro_lite: "border-yellow-300 bg-gradient-to-b from-yellow-50 to-yellow-100 text-yellow-900 shadow-[inset_0_1px_0_rgba(255,255,255,0.85),0_1px_2px_rgba(202,138,4,0.18)]",
-    pro5x: "border-yellow-300 bg-gradient-to-b from-yellow-50 to-yellow-100 text-yellow-900 shadow-[inset_0_1px_0_rgba(255,255,255,0.85),0_1px_2px_rgba(202,138,4,0.18)]",
-    "pro-5x": "border-yellow-300 bg-gradient-to-b from-yellow-50 to-yellow-100 text-yellow-900 shadow-[inset_0_1px_0_rgba(255,255,255,0.85),0_1px_2px_rgba(202,138,4,0.18)]",
-    pro_5x: "border-yellow-300 bg-gradient-to-b from-yellow-50 to-yellow-100 text-yellow-900 shadow-[inset_0_1px_0_rgba(255,255,255,0.85),0_1px_2px_rgba(202,138,4,0.18)]",
+    pro20x:
+      "border-amber-300 bg-gradient-to-b from-amber-50 to-amber-100 text-amber-900 shadow-[inset_0_1px_0_rgba(255,255,255,0.85),0_1px_2px_rgba(217,119,6,0.22)]",
+    "pro-20x":
+      "border-amber-300 bg-gradient-to-b from-amber-50 to-amber-100 text-amber-900 shadow-[inset_0_1px_0_rgba(255,255,255,0.85),0_1px_2px_rgba(217,119,6,0.22)]",
+    pro_20x:
+      "border-amber-300 bg-gradient-to-b from-amber-50 to-amber-100 text-amber-900 shadow-[inset_0_1px_0_rgba(255,255,255,0.85),0_1px_2px_rgba(217,119,6,0.22)]",
+    prolite:
+      "border-yellow-300 bg-gradient-to-b from-yellow-50 to-yellow-100 text-yellow-900 shadow-[inset_0_1px_0_rgba(255,255,255,0.85),0_1px_2px_rgba(202,138,4,0.18)]",
+    "pro-lite":
+      "border-yellow-300 bg-gradient-to-b from-yellow-50 to-yellow-100 text-yellow-900 shadow-[inset_0_1px_0_rgba(255,255,255,0.85),0_1px_2px_rgba(202,138,4,0.18)]",
+    pro_lite:
+      "border-yellow-300 bg-gradient-to-b from-yellow-50 to-yellow-100 text-yellow-900 shadow-[inset_0_1px_0_rgba(255,255,255,0.85),0_1px_2px_rgba(202,138,4,0.18)]",
+    pro5x:
+      "border-yellow-300 bg-gradient-to-b from-yellow-50 to-yellow-100 text-yellow-900 shadow-[inset_0_1px_0_rgba(255,255,255,0.85),0_1px_2px_rgba(202,138,4,0.18)]",
+    "pro-5x":
+      "border-yellow-300 bg-gradient-to-b from-yellow-50 to-yellow-100 text-yellow-900 shadow-[inset_0_1px_0_rgba(255,255,255,0.85),0_1px_2px_rgba(202,138,4,0.18)]",
+    pro_5x:
+      "border-yellow-300 bg-gradient-to-b from-yellow-50 to-yellow-100 text-yellow-900 shadow-[inset_0_1px_0_rgba(255,255,255,0.85),0_1px_2px_rgba(202,138,4,0.18)]",
     plus: "border-blue-300 bg-blue-50 text-blue-800",
     free: "border-slate-300 bg-slate-50 text-slate-700",
   };

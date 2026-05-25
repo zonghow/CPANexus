@@ -72,6 +72,31 @@ export const exceptionAuthFiles = sqliteTable(
   ],
 );
 
+export const candidateAuthFiles = sqliteTable(
+  "candidate_auth_files",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    fileName: text("file_name").notNull(),
+    email: text("email"),
+    provider: text("provider"),
+    available: integer("available", { mode: "boolean" }).notNull().default(true),
+    status: text("status"),
+    statusMessage: text("status_message"),
+    rawJson: text("raw_json").notNull(),
+    quotaRawJson: text("quota_raw_json"),
+    usage5hPercent: real("usage_5h_percent"),
+    usageWeekPercent: real("usage_week_percent"),
+    lastQuotaRefreshedAt: text("last_quota_refreshed_at"),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("candidate_auth_files_file_unique").on(table.fileName),
+    index("candidate_auth_files_email_idx").on(table.email),
+    index("candidate_auth_files_updated_at_idx").on(table.updatedAt),
+  ],
+);
+
 export const quotaSnapshots = sqliteTable("quota_snapshots", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   cpaInstanceId: integer("cpa_instance_id")
