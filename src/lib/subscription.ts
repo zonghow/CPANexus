@@ -25,6 +25,32 @@ export function isFreeSubscriptionType(value: string | null) {
   return value?.trim().toLowerCase() === "free";
 }
 
+export function subscriptionAverageWeight(value: string | null) {
+  const normalized = value?.trim().toLowerCase();
+
+  if (
+    normalized === "pro" ||
+    normalized === "pro20x" ||
+    normalized === "pro-20x" ||
+    normalized === "pro_20x"
+  ) {
+    return 20;
+  }
+
+  if (
+    normalized === "prolite" ||
+    normalized === "pro-lite" ||
+    normalized === "pro_lite" ||
+    normalized === "pro5x" ||
+    normalized === "pro-5x" ||
+    normalized === "pro_5x"
+  ) {
+    return 5;
+  }
+
+  return 1;
+}
+
 function firstString(obj: Record<string, unknown>, keys: string[]) {
   for (const key of keys) {
     const value = obj[key];

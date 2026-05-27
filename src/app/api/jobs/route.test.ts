@@ -169,6 +169,7 @@ describe("/api/jobs", () => {
     const payload = (await response.json()) as {
       cpaSyncs: Array<{
         cpaInstanceId: number;
+        phase: string;
         startedAt: string;
       }>;
     };
@@ -176,6 +177,51 @@ describe("/api/jobs", () => {
     expect(payload.cpaSyncs).toEqual([
       {
         cpaInstanceId,
+        phase: "auth_files",
+        startedAt: "2026-05-14T06:51:00.000Z",
+      },
+    ]);
+  });
+
+  it("exposes active CPA sync background phases", async () => {
+    const { migrate } = await import("@/db/migrate");
+    const { getSqlite } = await import("@/db/client");
+    migrate();
+    const sqlite = getSqlite();
+    const cpaInstanceId = Number(
+      sqlite
+        .prepare(`
+          INSERT INTO cpa_instances (name, base_url, password, quota_refresh_path, enabled)
+          VALUES ('target', 'https://target.example.com', 'secret', '/v0/management/auth-files', 1)
+        `)
+        .run().lastInsertRowid,
+    );
+    sqlite
+      .prepare(`
+        INSERT INTO cpa_instance_sync_runs (cpa_instance_id, status, phase, message, started_at, finished_at)
+        VALUES (?, 'running', 'auth_payloads', '补全认证文件中', '2026-05-14T06:51:00.000Z', NULL)
+      `)
+      .run(cpaInstanceId);
+    const route = await import("./route");
+
+    const response = await route.GET(
+      new Request("http://localhost/api/jobs", {
+        headers: authHeaders(),
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    const payload = (await response.json()) as {
+      cpaSyncs: Array<{
+        cpaInstanceId: number;
+        phase: string;
+      }>;
+    };
+
+    expect(payload.cpaSyncs).toEqual([
+      {
+        cpaInstanceId,
+        phase: "auth_payloads",
         startedAt: "2026-05-14T06:51:00.000Z",
       },
     ]);

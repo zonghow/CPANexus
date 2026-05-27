@@ -86,7 +86,7 @@ import {
   type CronSimpleMode,
   type CronSimpleSchedule,
 } from "@/lib/cron-presets";
-import { averageRemainingPercent } from "@/lib/quota-summary";
+import { averageAccountRemainingPercent } from "@/lib/quota-summary";
 import {
   defaultRtLoginProxyMode,
   type RtLoginProxyMode,
@@ -218,11 +218,15 @@ type JobRunsPagination = {
   totalPages: number;
 };
 
+type CpaSyncPhase = "auth_files" | "auth_payloads" | "quotas";
+type CpaBusyPhase = CpaSyncPhase | "updating";
+
 type JobsApiResponse = {
   jobs: CronJob[];
   runs: JobRun[];
   cpaSyncs: Array<{
     cpaInstanceId: number;
+    phase: CpaSyncPhase;
     startedAt: string;
   }>;
   runsPagination: JobRunsPagination;
@@ -389,12 +393,25 @@ export function CpaDashboard({
   const scheduledSyncRunRef = useRef<string | null>(null);
   const remoteSyncRunningRef = useRef(false);
   const remoteCpaSyncingIdsRef = useRef<Set<number>>(new Set());
+  const remoteCpaAccountUpdatingIdsRef = useRef<Set<number>>(new Set());
   const [updatingCpaIds, setUpdatingCpaIds] = useState<Set<number>>(
     () => new Set(),
   );
   const [remoteUpdatingCpaIds, setRemoteUpdatingCpaIds] = useState<Set<number>>(
     () => new Set(),
   );
+  const [syncingCpaIds, setSyncingCpaIds] = useState<Set<number>>(
+    () => new Set(),
+  );
+  const [remoteSyncingCpaIds, setRemoteSyncingCpaIds] = useState<Set<number>>(
+    () => new Set(),
+  );
+  const [syncingCpaPhases, setSyncingCpaPhases] = useState<
+    Map<number, CpaBusyPhase>
+  >(() => new Map());
+  const [remoteSyncingCpaPhases, setRemoteSyncingCpaPhases] = useState<
+    Map<number, CpaSyncPhase>
+  >(() => new Map());
   const [runningJobKeys, setRunningJobKeys] = useState<Set<string>>(
     () => new Set(),
   );
@@ -439,6 +456,42 @@ export function CpaDashboard({
     [],
   );
 
+  const markCpaTablesSyncing = useCallback(
+    (
+      cpaInstanceIds: number[],
+      syncing: boolean,
+      phase: CpaBusyPhase = "updating",
+    ) => {
+      if (cpaInstanceIds.length === 0) {
+        return;
+      }
+
+      setSyncingCpaIds((current) => {
+        const next = new Set(current);
+        cpaInstanceIds.forEach((id) => {
+          if (syncing) {
+            next.add(id);
+          } else {
+            next.delete(id);
+          }
+        });
+        return next;
+      });
+      setSyncingCpaPhases((current) => {
+        const next = new Map(current);
+        cpaInstanceIds.forEach((id) => {
+          if (syncing) {
+            next.set(id, phase);
+          } else {
+            next.delete(id);
+          }
+        });
+        return next;
+      });
+    },
+    [],
+  );
+
   const markJobRunning = useCallback((key: string, running: boolean) => {
     setRunningJobKeys((current) => {
       const next = new Set(current);
@@ -452,11 +505,33 @@ export function CpaDashboard({
   }, []);
 
   const applyJobsResponse = useCallback((jobRes: JobsApiResponse) => {
+    const cpaSyncs = jobRes.cpaSyncs ?? [];
+    const backgroundSyncingIds = cpaSyncs
+      .filter((sync) => sync.phase !== "auth_files")
+      .map((sync) => sync.cpaInstanceId);
+
     setJobs(jobRes.jobs);
     setRuns(jobRes.runs);
     setRemoteUpdatingCpaIds(
-      new Set((jobRes.cpaSyncs ?? []).map((sync) => sync.cpaInstanceId)),
+      new Set(
+        cpaSyncs
+          .filter((sync) => sync.phase === "auth_files")
+          .map((sync) => sync.cpaInstanceId),
+      ),
     );
+    setRemoteSyncingCpaIds(
+      new Set(cpaSyncs.map((sync) => sync.cpaInstanceId)),
+    );
+    setRemoteSyncingCpaPhases(
+      new Map(cpaSyncs.map((sync) => [sync.cpaInstanceId, sync.phase])),
+    );
+    if (backgroundSyncingIds.length > 0) {
+      setUpdatingCpaIds((current) => {
+        const next = new Set(current);
+        backgroundSyncingIds.forEach((id) => next.delete(id));
+        return next;
+      });
+    }
     const nextRunsPagination =
       jobRes.runsPagination ?? defaultJobRunsPagination;
     runsPaginationRef.current = nextRunsPagination;
@@ -561,12 +636,21 @@ export function CpaDashboard({
         const cpaSyncingIds = new Set(
           (jobRes.cpaSyncs ?? []).map((sync) => sync.cpaInstanceId),
         );
+        const cpaAccountUpdatingIds = new Set(
+          (jobRes.cpaSyncs ?? [])
+            .filter((sync) => sync.phase === "auth_files")
+            .map((sync) => sync.cpaInstanceId),
+        );
         const hadCpaSyncing = remoteCpaSyncingIdsRef.current.size > 0;
+        const finishedAccountUpdating = [...remoteCpaAccountUpdatingIdsRef.current]
+          .some((id) => !cpaAccountUpdatingIds.has(id));
         remoteSyncRunningRef.current = syncRunning;
         remoteCpaSyncingIdsRef.current = cpaSyncingIds;
+        remoteCpaAccountUpdatingIdsRef.current = cpaAccountUpdatingIds;
         if (
           (wasSyncRunning && !syncRunning) ||
-          (hadCpaSyncing && cpaSyncingIds.size === 0)
+          (hadCpaSyncing && cpaSyncingIds.size === 0) ||
+          finishedAccountUpdating
         ) {
           await loadAll({ runsPage: 1 });
         }
@@ -604,6 +688,22 @@ export function CpaDashboard({
     () => new Set([...updatingCpaIds, ...remoteUpdatingCpaIds]),
     [remoteUpdatingCpaIds, updatingCpaIds],
   );
+  const effectiveSyncingCpaIds = useMemo(
+    () =>
+      new Set([
+        ...syncingCpaIds,
+        ...remoteSyncingCpaIds,
+        ...effectiveUpdatingCpaIds,
+      ]),
+    [effectiveUpdatingCpaIds, remoteSyncingCpaIds, syncingCpaIds],
+  );
+  const effectiveSyncingCpaPhases = useMemo(() => {
+    const next = new Map<number, CpaBusyPhase>();
+    effectiveUpdatingCpaIds.forEach((id) => next.set(id, "updating"));
+    syncingCpaPhases.forEach((phase, id) => next.set(id, phase));
+    remoteSyncingCpaPhases.forEach((phase, id) => next.set(id, phase));
+    return next;
+  }, [effectiveUpdatingCpaIds, remoteSyncingCpaPhases, syncingCpaPhases]);
   const syncButtonLabel = formatSyncButtonLabel(
     syncJob,
     syncCountdownSeconds,
@@ -646,6 +746,7 @@ export function CpaDashboard({
       const updatingIds = cpaTableUpdatingIdsForJob(syncJobKey, instances);
       markJobRunning(syncJobKey, true);
       markCpaTablesUpdating(updatingIds, true);
+      markCpaTablesSyncing(updatingIds, true, "auth_files");
 
       try {
         await waitForScheduledSyncCompletion(scheduledRunAt);
@@ -654,6 +755,7 @@ export function CpaDashboard({
         toast.error(error instanceof Error ? error.message : String(error));
       } finally {
         markCpaTablesUpdating(updatingIds, false);
+        markCpaTablesSyncing(updatingIds, false);
         markJobRunning(syncJobKey, false);
         scheduledSyncRunRef.current = null;
       }
@@ -662,6 +764,7 @@ export function CpaDashboard({
       instances,
       loadAll,
       markCpaTablesUpdating,
+      markCpaTablesSyncing,
       markJobRunning,
       waitForScheduledSyncCompletion,
     ],
@@ -699,7 +802,13 @@ export function CpaDashboard({
   async function withUpdatingCpaTables(
     cpaInstanceIds: Array<number | null | undefined>,
     action: () => Promise<void>,
+    options: {
+      phase?: CpaBusyPhase;
+      showUpdatingOverlay?: boolean;
+    } = {},
   ) {
+    const phase = options.phase ?? "updating";
+    const showUpdatingOverlay = options.showUpdatingOverlay ?? true;
     const ids = [
       ...new Set(
         cpaInstanceIds.filter(
@@ -708,6 +817,18 @@ export function CpaDashboard({
       ),
     ];
     if (ids.length > 0) {
+      setSyncingCpaIds((current) => {
+        const next = new Set(current);
+        ids.forEach((id) => next.add(id));
+        return next;
+      });
+      setSyncingCpaPhases((current) => {
+        const next = new Map(current);
+        ids.forEach((id) => next.set(id, phase));
+        return next;
+      });
+    }
+    if (ids.length > 0 && showUpdatingOverlay) {
       setUpdatingCpaIds((current) => {
         const next = new Set(current);
         ids.forEach((id) => next.add(id));
@@ -719,6 +840,16 @@ export function CpaDashboard({
       await action();
     } finally {
       if (ids.length > 0) {
+        setSyncingCpaIds((current) => {
+          const next = new Set(current);
+          ids.forEach((id) => next.delete(id));
+          return next;
+        });
+        setSyncingCpaPhases((current) => {
+          const next = new Map(current);
+          ids.forEach((id) => next.delete(id));
+          return next;
+        });
         setUpdatingCpaIds((current) => {
           const next = new Set(current);
           ids.forEach((id) => next.delete(id));
@@ -807,16 +938,20 @@ export function CpaDashboard({
       return next;
     });
     try {
-      await withUpdatingCpaTables(updatingIds, async () => {
-        const result = await mutate<{ status: string; message: string }>(
-          `/api/jobs/${encodeURIComponent(key)}/run`,
-          {
-            method: "POST",
-          },
-        );
-        toast.success(result.message);
-        await loadAll({ runsPage: 1 });
-      });
+      await withUpdatingCpaTables(
+        updatingIds,
+        async () => {
+          const result = await mutate<{ status: string; message: string }>(
+            `/api/jobs/${encodeURIComponent(key)}/run`,
+            {
+              method: "POST",
+            },
+          );
+          toast.success(result.message);
+          await loadAll({ runsPage: 1 });
+        },
+        { phase: key === syncJobKey ? "auth_files" : "updating" },
+      );
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : String(error);
@@ -918,22 +1053,26 @@ export function CpaDashboard({
   async function refreshAuthFileQuota(id: number) {
     const sourceCpaInstanceId = findAuthFileCpaInstanceId(id);
     try {
-      await withUpdatingCpaTables([sourceCpaInstanceId], async () => {
-        const result = await mutate<{
-          status: string;
-          message: string;
-          instance: string;
-        }>(`/api/auth-files/${id}`, {
-          method: "POST",
-          body: JSON.stringify({ action: "refreshQuota" }),
-        });
-        if (result.status === "success") {
-          toast.success(`${result.instance}：${result.message}`);
-        } else {
-          toast.error(`${result.instance}：${result.message}`);
-        }
-        await loadAll();
-      });
+      await withUpdatingCpaTables(
+        [sourceCpaInstanceId],
+        async () => {
+          const result = await mutate<{
+            status: string;
+            message: string;
+            instance: string;
+          }>(`/api/auth-files/${id}`, {
+            method: "POST",
+            body: JSON.stringify({ action: "refreshQuota" }),
+          });
+          if (result.status === "success") {
+            toast.success(`${result.instance}：${result.message}`);
+          } else {
+            toast.error(`${result.instance}：${result.message}`);
+          }
+          await loadAll();
+        },
+        { phase: "quotas", showUpdatingOverlay: false },
+      );
     } catch (error) {
       toast.error(error instanceof Error ? error.message : String(error));
     }
@@ -1331,15 +1470,19 @@ export function CpaDashboard({
 
   async function refreshCpaInstance(cpaInstanceId: number) {
     try {
-      await withUpdatingCpaTables([cpaInstanceId], async () => {
-        const result = await mutate<{
-          status: string;
-          message: string;
-          instance: string;
-        }>(`/api/cpa-instances/${cpaInstanceId}/sync`, { method: "POST" });
-        toast.success(`${result.instance}：${result.message}`);
-        await loadAll();
-      });
+      await withUpdatingCpaTables(
+        [cpaInstanceId],
+        async () => {
+          const result = await mutate<{
+            status: string;
+            message: string;
+            instance: string;
+          }>(`/api/cpa-instances/${cpaInstanceId}/sync`, { method: "POST" });
+          toast.success(`${result.instance}：${result.message}`);
+          await loadAll();
+        },
+        { phase: "auth_files" },
+      );
     } catch (error) {
       toast.error(error instanceof Error ? error.message : String(error));
     }
@@ -1467,6 +1610,8 @@ export function CpaDashboard({
                 quotaGroups={quotaGroups}
                 proxies={proxies}
                 updatingCpaIds={effectiveUpdatingCpaIds}
+                syncingCpaIds={effectiveSyncingCpaIds}
+                syncingCpaPhases={effectiveSyncingCpaPhases}
                 nowMs={nowMs}
                 onDeleteAuthFile={deleteAuthFile}
                 onPortalExceptionAuthFile={portalExceptionAuthFile}
@@ -1829,6 +1974,8 @@ function AuthFilesSection({
   quotaGroups,
   proxies,
   updatingCpaIds,
+  syncingCpaIds,
+  syncingCpaPhases,
   nowMs,
   onDeleteAuthFile,
   onPortalExceptionAuthFile,
@@ -1851,6 +1998,8 @@ function AuthFilesSection({
   quotaGroups: Array<{ instance: CpaInstance; quotas: QuotaSnapshot[] }>;
   proxies: ProxyRow[];
   updatingCpaIds: Set<number>;
+  syncingCpaIds: Set<number>;
+  syncingCpaPhases: Map<number, CpaBusyPhase>;
   nowMs: number;
   onDeleteAuthFile: (id: number) => Promise<void>;
   onPortalExceptionAuthFile: (id: number) => Promise<void>;
@@ -2717,13 +2866,19 @@ function AuthFilesSection({
       (row) => row.quotaStatus === "available",
     ).length;
     const hasAssignableProxy = proxiesForCpa(group.instance.id).length > 0;
-    const average5hRemaining = averageRemainingPercent(
-      activeRows.map((row) => row.usage5hPercent),
+    const average5hRemaining = averageAccountRemainingPercent(
+      activeRows,
+      "usage5hPercent",
     );
-    const averageWeekRemaining = averageRemainingPercent(
-      activeRows.map((row) => row.usageWeekPercent),
+    const averageWeekRemaining = averageAccountRemainingPercent(
+      activeRows,
+      "usageWeekPercent",
     );
     const isUpdating = updatingCpaIds.has(group.instance.id);
+    const isSyncing = syncingCpaIds.has(group.instance.id) || isUpdating;
+    const syncingLabel = isSyncing
+      ? cpaBusyPhaseLabel(syncingCpaPhases.get(group.instance.id))
+      : null;
     const isDragTarget = dragTargetCpaId === group.instance.id;
     const hasOpenHeaderMenu =
       openLoginMenuInstanceId === group.instance.id ||
@@ -2761,13 +2916,18 @@ function AuthFilesSection({
               variant="ghost"
               aria-label={`刷新 ${group.instance.name}`}
               title="刷新"
-              disabled={isUpdating}
+              disabled={isSyncing}
               onClick={() => void onRefreshCpa(group.instance.id)}
             >
               <RefreshCw
-                className={cn("h-3.5 w-3.5", isUpdating && "animate-spin")}
+                className={cn("h-3.5 w-3.5", isSyncing && "animate-spin")}
               />
             </Button>
+            {syncingLabel ? (
+              <span className="text-[11px] text-muted-foreground">
+                {syncingLabel}
+              </span>
+            ) : null}
             <div
               ref={
                 openLoginMenuInstanceId === group.instance.id
@@ -2845,7 +3005,7 @@ function AuthFilesSection({
                 aria-label={`${group.instance.name} 交换`}
                 aria-expanded={openExchangeMenuInstanceId === group.instance.id}
                 aria-haspopup="menu"
-                disabled={rows.length === 0 || isUpdating}
+                disabled={rows.length === 0 || isSyncing}
                 title={rows.length === 0 ? "暂无账号" : undefined}
                 onClick={(event) =>
                   toggleExchangeMenu(event, group.instance.id)
@@ -2922,7 +3082,7 @@ function AuthFilesSection({
                 <div className="absolute left-0 top-7 z-[60] min-w-40 rounded-md border bg-popover p-1 text-popover-foreground shadow-md">
                   <button
                     type="button"
-                    disabled={!hasAssignableProxy || isUpdating}
+                    disabled={!hasAssignableProxy || isSyncing}
                     title={
                       !hasAssignableProxy
                         ? "没有启用且允许用于该 CPA 的代理"
@@ -4094,11 +4254,13 @@ function CandidatePoolSection({
   const allVisibleSelected =
     visibleIds.length > 0 && selectedVisibleCount === visibleIds.length;
   const activeRows = tableRows.filter((row) => row.quotaStatus !== "pending");
-  const average5hRemaining = averageRemainingPercent(
-    activeRows.map((row) => row.usage5hPercent),
+  const average5hRemaining = averageAccountRemainingPercent(
+    activeRows,
+    "usage5hPercent",
   );
-  const averageWeekRemaining = averageRemainingPercent(
-    activeRows.map((row) => row.usageWeekPercent),
+  const averageWeekRemaining = averageAccountRemainingPercent(
+    activeRows,
+    "usageWeekPercent",
   );
   const availableCount = tableRows.filter(
     (row) => row.quotaStatus === "available",
@@ -7053,6 +7215,20 @@ function formatCandidateTimestamp(value: string | null) {
   }
   const timestamp = new Date(value).getTime();
   return Number.isFinite(timestamp) ? new Date(timestamp).toLocaleString("zh-CN") : value;
+}
+
+function cpaBusyPhaseLabel(phase: CpaBusyPhase | undefined) {
+  if (phase === "auth_files") {
+    return "拉账号...";
+  }
+  if (phase === "auth_payloads") {
+    return "补JSON...";
+  }
+  if (phase === "quotas") {
+    return "刷额度...";
+  }
+
+  return "更新...";
 }
 
 function formatRelativeTime(value: string | null, nowMs: number) {

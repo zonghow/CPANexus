@@ -258,6 +258,7 @@ export function migrate() {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       cpa_instance_id INTEGER NOT NULL REFERENCES cpa_instances(id) ON DELETE CASCADE,
       status TEXT NOT NULL,
+      phase TEXT NOT NULL DEFAULT 'auth_files',
       message TEXT,
       started_at TEXT NOT NULL,
       finished_at TEXT,
@@ -322,6 +323,10 @@ export function migrate() {
       ON message_push_deliveries(policy_id, sent_at);
 
   `);
+
+  if (!hasColumn(sqlite, "cpa_instance_sync_runs", "phase")) {
+    sqlite.exec("ALTER TABLE cpa_instance_sync_runs ADD COLUMN phase TEXT NOT NULL DEFAULT 'auth_files'");
+  }
 
   if (!hasColumn(sqlite, "message_push_policies", "delivery_type")) {
     sqlite.exec("ALTER TABLE message_push_policies ADD COLUMN delivery_type TEXT NOT NULL DEFAULT 'webhook'");

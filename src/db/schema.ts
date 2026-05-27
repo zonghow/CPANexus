@@ -193,6 +193,7 @@ export const cpaInstanceSyncRuns = sqliteTable("cpa_instance_sync_runs", {
     .notNull()
     .references(() => cpaInstances.id, { onDelete: "cascade" }),
   status: text("status").notNull(),
+  phase: text("phase").notNull().default("auth_files"),
   message: text("message"),
   startedAt: text("started_at").notNull(),
   finishedAt: text("finished_at"),

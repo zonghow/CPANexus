@@ -182,6 +182,44 @@ describe("migrate", () => {
     );
   });
 
+  it("adds sync phase storage for active CPA sync runs", async () => {
+    const { migrate } = await import("./migrate");
+    const { getSqlite } = await import("./client");
+
+    migrate();
+    const sqlite = getSqlite();
+
+    const columns = sqlite
+      .prepare("PRAGMA table_info(cpa_instance_sync_runs)")
+      .all() as Array<{ name: string }>;
+    expect(columns.map((column) => column.name)).toContain("phase");
+  });
+
+  it("adds sync phase storage to existing CPA sync run tables", async () => {
+    const { migrate } = await import("./migrate");
+    const { getSqlite } = await import("./client");
+
+    const sqlite = getSqlite();
+    sqlite.exec(`
+      CREATE TABLE cpa_instance_sync_runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        cpa_instance_id INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        message TEXT,
+        started_at TEXT NOT NULL,
+        finished_at TEXT,
+        raw_json TEXT
+      );
+    `);
+
+    migrate();
+
+    const columns = sqlite
+      .prepare("PRAGMA table_info(cpa_instance_sync_runs)")
+      .all() as Array<{ name: string }>;
+    expect(columns.map((column) => column.name)).toContain("phase");
+  });
+
   it("creates message push policy storage", async () => {
     const { migrate } = await import("./migrate");
     const { getSqlite } = await import("./client");

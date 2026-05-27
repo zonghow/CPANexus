@@ -73,6 +73,12 @@ export async function GET(request: Request) {
       runs,
       cpaSyncs: cpaSyncs.map((run) => ({
         cpaInstanceId: run.cpaInstanceId,
+        phase:
+          run.phase === "quotas"
+            ? "quotas"
+            : run.phase === "auth_payloads"
+              ? "auth_payloads"
+              : "auth_files",
         startedAt: run.startedAt,
       })),
       runsPagination: {

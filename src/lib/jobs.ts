@@ -31,6 +31,7 @@ export const jobKeys = {
 const quotaPendingStatus = "待配额刷新";
 const quotaPendingMessage = "等待配额刷新接口返回结果";
 const jobRunningMessage = "当前有同步任务正在进行中";
+const authPayloadDownloadConcurrency = 6;
 
 export class JobAlreadyRunningError extends Error {
   constructor() {
@@ -65,6 +66,8 @@ export type CpaInstanceSyncResult = {
   status: "success" | "error";
   message: string;
 };
+
+type CpaInstanceSyncPhase = "auth_files" | "auth_payloads" | "quotas";
 
 export async function runJobByKey(jobKey: string): Promise<JobRunResult> {
   if (jobKey === jobKeys.sync) {
@@ -121,13 +124,21 @@ export async function syncCpaInstanceById(cpaInstanceId: number) {
 }
 
 async function syncCpaInstance(instance: CpaInstance): Promise<CpaInstanceSyncResult> {
-  return recordCpaInstanceSyncRun(instance, () => performCpaInstanceSync(instance));
+  return recordCpaInstanceSyncRun(instance, (runId) =>
+    performCpaInstanceSync(instance, runId),
+  );
 }
 
-async function performCpaInstanceSync(instance: CpaInstance): Promise<CpaInstanceSyncResult> {
+async function performCpaInstanceSync(
+  instance: CpaInstance,
+  syncRunId: number,
+): Promise<CpaInstanceSyncResult> {
   try {
     const remoteFiles = await listRemoteAuthFiles(instance);
     await syncAuthFilesForInstance(instance, remoteFiles);
+    updateCpaInstanceSyncRunPhase(syncRunId, "auth_payloads", "补全认证文件中");
+    const payloadResult = await syncAuthFilePayloadsForInstance(instance, remoteFiles);
+    updateCpaInstanceSyncRunPhase(syncRunId, "quotas", "刷新配额中");
     const quotaResult = await syncQuotasForInstance(instance, remoteFiles);
     recordDashboardMetricSnapshot(instance.id, nowIso());
     await evaluateMessagePushPoliciesForCpa(instance.id);
@@ -145,7 +156,7 @@ async function performCpaInstanceSync(instance: CpaInstance): Promise<CpaInstanc
     return {
       instance: instance.name,
       status: "success",
-      message: `synced ${remoteFiles.length} auth files, ${quotaResult} quota snapshots`,
+      message: `synced ${remoteFiles.length} auth files, ${payloadResult.downloaded} auth payloads, ${quotaResult} quota snapshots`,
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -276,20 +287,10 @@ async function syncAuthFilesForInstance(
       continue;
     }
 
-    let rawJson: string | null = JSON.stringify(remoteFile);
-    let downloadedProxyUrl: string | null = null;
-    let downloadedCreatedAt: string | null = null;
-    try {
-      const downloaded = await downloadRemoteAuthFile(instance, fileName);
-      downloadedProxyUrl = proxyUrlFromDownloadedAuthFile(downloaded);
-      downloadedCreatedAt = authFileCreatedAt(downloaded);
-      rawJson = JSON.stringify(downloaded);
-    } catch {
-      rawJson = JSON.stringify(remoteFile);
-    }
-    const proxyUrl = stringOrNull(remoteFile.proxy_url) ?? downloadedProxyUrl;
+    const rawJson = JSON.stringify(remoteFile);
+    const proxyUrl = stringOrNull(remoteFile.proxy_url);
     const syncedAt = nowIso();
-    const createdAt = authFileCreatedAt(remoteFile) ?? downloadedCreatedAt ?? syncedAt;
+    const createdAt = authFileCreatedAt(remoteFile) ?? syncedAt;
 
     db.insert(authFiles)
       .values({
@@ -322,9 +323,14 @@ async function syncAuthFilesForInstance(
           statusMessage: quotaPendingMessage,
           disabled: Boolean(remoteFile.disabled),
           available: false,
-          proxyUrl,
+          proxyUrl: proxyUrl ?? sql`${authFiles.proxyUrl}`,
           size: typeof remoteFile.size === "number" ? remoteFile.size : null,
-          rawJson,
+          rawJson: sql`
+            CASE
+              WHEN ${authFiles.rawJson} IS NULL OR trim(${authFiles.rawJson}) = '' THEN ${rawJson}
+              ELSE ${authFiles.rawJson}
+            END
+          `,
           createdAt: sql`
             CASE
               WHEN ${authFiles.createdAt} IS NULL OR trim(${authFiles.createdAt}) = '' THEN ${createdAt}
@@ -337,6 +343,78 @@ async function syncAuthFilesForInstance(
       })
       .run();
   }
+}
+
+async function syncAuthFilePayloadsForInstance(
+  instance: CpaInstance,
+  remoteFiles: RemoteAuthFile[],
+) {
+  let downloaded = 0;
+
+  await mapWithConcurrency(
+    remoteFiles,
+    authPayloadDownloadConcurrency,
+    async (remoteFile) => {
+      const fileName = remoteFile.name?.trim();
+      if (!fileName) {
+        return;
+      }
+
+      try {
+        const payload = await downloadRemoteAuthFile(instance, fileName);
+        if (updateDownloadedAuthFilePayload(instance.id, remoteFile, payload)) {
+          downloaded += 1;
+        }
+      } catch {
+        // Full auth payload download is a best-effort cache warmup. Operations
+        // that need the payload still download it on demand before falling back.
+      }
+    },
+  );
+
+  return { downloaded };
+}
+
+function updateDownloadedAuthFilePayload(
+  cpaInstanceId: number,
+  remoteFile: RemoteAuthFile,
+  payload: unknown,
+) {
+  const fileName = remoteFile.name.trim();
+  const rawJson = JSON.stringify(payload);
+  if (!rawJson) {
+    return false;
+  }
+
+  const proxyUrl =
+    stringOrNull(remoteFile.proxy_url) ?? proxyUrlFromDownloadedAuthFile(payload);
+  const downloadedCreatedAt = authFileCreatedAt(payload);
+  const updatedAt = nowIso();
+
+  db.update(authFiles)
+    .set({
+      rawJson,
+      proxyUrl,
+      createdAt: downloadedCreatedAt
+        ? sql`
+            CASE
+              WHEN ${authFiles.createdAt} IS NULL OR trim(${authFiles.createdAt}) = '' THEN ${downloadedCreatedAt}
+              WHEN ${downloadedCreatedAt} < ${authFiles.createdAt} THEN ${downloadedCreatedAt}
+              ELSE ${authFiles.createdAt}
+            END
+          `
+        : sql`${authFiles.createdAt}`,
+      lastSyncedAt: updatedAt,
+    })
+    .where(
+      and(
+        eq(authFiles.cpaInstanceId, cpaInstanceId),
+        eq(authFiles.fileName, fileName),
+      ),
+    )
+    .run();
+
+  return true;
 }
 
 function authFileCreatedAt(value: unknown) {
@@ -669,13 +747,13 @@ function insertRunningJobRun(jobKey: string, startedAt: string) {
 
 async function recordCpaInstanceSyncRun(
   instance: CpaInstance,
-  run: () => Promise<CpaInstanceSyncResult>,
+  run: (runId: number) => Promise<CpaInstanceSyncResult>,
 ) {
   const startedAt = nowIso();
   const runId = insertRunningCpaInstanceSyncRun(instance, startedAt);
 
   try {
-    const result = await run();
+    const result = await run(runId);
     const finishedAt = nowIso();
     db.update(cpaInstanceSyncRuns)
       .set({
@@ -708,7 +786,8 @@ function insertRunningCpaInstanceSyncRun(instance: CpaInstance, startedAt: strin
       .values({
         cpaInstanceId: instance.id,
         status: "running",
-        message: "同步中",
+        phase: "auth_files",
+        message: "拉取账号中",
         startedAt,
       })
       .returning({ id: cpaInstanceSyncRuns.id })
@@ -720,6 +799,36 @@ function insertRunningCpaInstanceSyncRun(instance: CpaInstance, startedAt: strin
     }
     throw error;
   }
+}
+
+function updateCpaInstanceSyncRunPhase(
+  runId: number,
+  phase: CpaInstanceSyncPhase,
+  message: string,
+) {
+  db.update(cpaInstanceSyncRuns)
+    .set({ phase, message })
+    .where(eq(cpaInstanceSyncRuns.id, runId))
+    .run();
+}
+
+async function mapWithConcurrency<T>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T) => Promise<void>,
+) {
+  let cursor = 0;
+  const workerCount = Math.min(Math.max(1, concurrency), items.length);
+
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (cursor < items.length) {
+        const index = cursor;
+        cursor += 1;
+        await worker(items[index]);
+      }
+    }),
+  );
 }
 
 function isSqliteUniqueConstraint(error: unknown, targetColumn: string) {

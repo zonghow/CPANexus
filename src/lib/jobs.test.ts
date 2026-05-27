@@ -99,9 +99,9 @@ describe("sync jobs", () => {
     await vi.waitFor(() => {
       expect(
         sqlite
-          .prepare("SELECT status FROM cpa_instance_sync_runs WHERE cpa_instance_id = ? AND finished_at IS NULL")
+          .prepare("SELECT status, phase FROM cpa_instance_sync_runs WHERE cpa_instance_id = ? AND finished_at IS NULL")
           .get(cpaInstanceId),
-      ).toEqual({ status: "running" });
+      ).toEqual({ status: "running", phase: "auth_files" });
     });
 
     await expect(jobs.syncCpaInstanceById(cpaInstanceId)).rejects.toThrow(
@@ -134,6 +134,98 @@ describe("sync jobs", () => {
     ).toEqual([
       { cpa_instance_id: cpaInstanceId, status: "success", finished: 1 },
     ]);
+  });
+
+  it("marks a CPA sync as quota phase after auth files are synced", async () => {
+    const sqlite = await setupSqlite();
+    const cpaInstanceId = insertInstance(sqlite);
+
+    const cpaClient = await import("@/lib/cpa-client");
+    const quotaRefresh = deferred<never[]>();
+    vi.mocked(cpaClient.listRemoteAuthFiles).mockResolvedValue([]);
+    vi.mocked(cpaClient.refreshRemoteQuotas).mockReturnValue(quotaRefresh.promise);
+    const jobs = await import("./jobs");
+
+    const run = jobs.syncCpaInstanceById(cpaInstanceId);
+    await vi.waitFor(() => {
+      expect(
+        sqlite
+          .prepare(`
+            SELECT status, phase, message
+            FROM cpa_instance_sync_runs
+            WHERE cpa_instance_id = ?
+              AND finished_at IS NULL
+          `)
+          .get(cpaInstanceId),
+      ).toEqual({
+        status: "running",
+        phase: "quotas",
+        message: "刷新配额中",
+      });
+    });
+
+    quotaRefresh.resolve([]);
+    await expect(run).resolves.toMatchObject({ status: "success" });
+  });
+
+  it("writes listed auth files before full payload downloads finish", async () => {
+    const sqlite = await setupSqlite();
+    const cpaInstanceId = insertInstance(sqlite);
+
+    const cpaClient = await import("@/lib/cpa-client");
+    const authPayload = deferred<unknown>();
+    vi.mocked(cpaClient.listRemoteAuthFiles).mockResolvedValue([
+      {
+        name: "fast@example.com.json",
+        email: "fast@example.com",
+        type: "codex",
+      },
+    ]);
+    vi.mocked(cpaClient.downloadRemoteAuthFile).mockReturnValue(authPayload.promise);
+    vi.mocked(cpaClient.refreshRemoteQuotas).mockResolvedValue([]);
+    const jobs = await import("./jobs");
+
+    const run = jobs.syncCpaInstanceById(cpaInstanceId);
+    await vi.waitFor(() => {
+      expect(
+        sqlite
+          .prepare(`
+            SELECT status, phase
+            FROM cpa_instance_sync_runs
+            WHERE cpa_instance_id = ?
+              AND finished_at IS NULL
+          `)
+          .get(cpaInstanceId),
+      ).toEqual({
+        status: "running",
+        phase: "auth_payloads",
+      });
+      expect(
+        sqlite
+          .prepare(`
+            SELECT email, json_extract(raw_json, '$.name') AS raw_name
+            FROM auth_files
+            WHERE cpa_instance_id = ?
+          `)
+          .get(cpaInstanceId),
+      ).toEqual({
+        email: "fast@example.com",
+        raw_name: "fast@example.com.json",
+      });
+    });
+    expect(cpaClient.refreshRemoteQuotas).not.toHaveBeenCalled();
+
+    authPayload.resolve({
+      type: "codex",
+      email: "fast@example.com",
+      refresh_token: "rt_full",
+    });
+    await expect(run).resolves.toMatchObject({ status: "success" });
+    expect(
+      sqlite
+        .prepare("SELECT json_extract(raw_json, '$.refresh_token') AS refresh_token FROM auth_files WHERE cpa_instance_id = ?")
+        .get(cpaInstanceId),
+    ).toEqual({ refresh_token: "rt_full" });
   });
 
   it("reads per-account proxy_url from downloaded auth files during sync", async () => {
