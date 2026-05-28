@@ -28,7 +28,7 @@ describe("averageAccountRemainingPercent", () => {
           {
             subscriptionType: "plus",
             quotaStatus: "limited",
-            usage5hPercent: null,
+            usage5hPercent: 20,
           },
           {
             subscriptionType: "free",
@@ -44,6 +44,21 @@ describe("averageAccountRemainingPercent", () => {
         "usage5hPercent",
       ),
     ).toBe(25);
+  });
+
+  it("treats limited weekly quota rows as 0 remaining even when usage is present", () => {
+    expect(
+      averageAccountRemainingPercent(
+        [
+          {
+            subscriptionType: "plus",
+            quotaStatus: "limited",
+            usageWeekPercent: 20,
+          },
+        ],
+        "usageWeekPercent",
+      ),
+    ).toBe(0);
   });
 
   it("weights Pro 5x and Pro 20x accounts as multiple Plus accounts", () => {

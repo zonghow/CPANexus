@@ -64,12 +64,12 @@ function getRemainingPercent(
   usagePercent: number | null | undefined,
   quotaStatus: AverageAccountQuotaState | undefined,
 ) {
-  if (typeof usagePercent === "number" && Number.isFinite(usagePercent)) {
-    return Math.max(0, Math.min(100, 100 - usagePercent));
-  }
-
   if (quotaStatus === "limited") {
     return 0;
+  }
+
+  if (typeof usagePercent === "number" && Number.isFinite(usagePercent)) {
+    return Math.max(0, Math.min(100, 100 - usagePercent));
   }
 
   return null;

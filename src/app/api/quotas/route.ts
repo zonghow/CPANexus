@@ -3,6 +3,7 @@ import { desc, eq } from "drizzle-orm";
 import { db } from "@/db/client";
 import { cpaInstances, quotaSnapshots } from "@/db/schema";
 import { initRequestDb, ok, requireAuth, serverError } from "@/lib/api";
+import { resolveAccountQuotaStatus } from "@/lib/account-quota-status";
 import { extractQuotaResetTimes } from "@/lib/quota-reset";
 import { extractSubscriptionType } from "@/lib/subscription";
 
@@ -28,11 +29,23 @@ export async function GET(request: Request) {
 
       return {
         instance,
-        quotas: latestByAccount(rows).map((row) => ({
-          ...row,
-          subscriptionType: extractSubscriptionType(row.rawJson),
-          ...extractQuotaResetTimes(row.rawJson, row.capturedAt),
-        })),
+        quotas: latestByAccount(rows).map((row) => {
+          const quotaStatus = resolveAccountQuotaStatus({
+            disabled: false,
+            available: row.available,
+            exception: row.exception,
+            rawJson: row.rawJson,
+          });
+
+          return {
+            ...row,
+            subscriptionType: extractSubscriptionType(row.rawJson),
+            quotaStatus: quotaStatus.state,
+            quotaStatusLabel: quotaStatus.label,
+            rawJson: null,
+            ...extractQuotaResetTimes(row.rawJson, row.capturedAt),
+          };
+        }),
       };
     });
 

@@ -25,11 +25,11 @@ import {
   Server,
   Trash2,
 } from "lucide-react";
-import Link from "next/link";
 import {
   type ChangeEvent,
   type DragEvent,
   type FormEvent,
+  type MouseEvent,
   useCallback,
   useEffect,
   useMemo,
@@ -139,6 +139,8 @@ type QuotaSnapshot = {
   email: string | null;
   authFileName: string | null;
   subscriptionType: string | null;
+  quotaStatus: AccountQuotaState | null;
+  quotaStatusLabel: string | null;
   usage5hPercent: number | null;
   usageWeekPercent: number | null;
   usage5hResetAt: string | null;
@@ -157,13 +159,18 @@ type CandidateAuthFile = {
   available: boolean;
   status: string | null;
   statusMessage: string | null;
-  rawJson: string;
+  rawJson: string | null;
   quotaRawJson: string | null;
+  quotaStatus: AccountQuotaState | null;
+  quotaStatusLabel: string | null;
   usage5hPercent: number | null;
   usageWeekPercent: number | null;
   usage5hResetAt: string | null;
   usageWeekResetAt: string | null;
   subscriptionType: string | null;
+  lastRefresh: string | null;
+  expired: string | null;
+  refreshToken: string | null;
   lastQuotaRefreshedAt: string | null;
   createdAt: string;
   updatedAt: string;
@@ -307,6 +314,14 @@ const navItems = [
 
 export type SectionId = (typeof navItems)[number]["id"];
 
+function sectionFromPathname(pathname: string): SectionId | null {
+  const segment = pathname.split("/").filter(Boolean)[0];
+  if (segment === "quotas") {
+    return "auth";
+  }
+  return navItems.find((item) => item.id === segment)?.id ?? null;
+}
+
 const cronModeLabels: Record<CronSimpleMode, string> = {
   interval: "每隔 N 分钟",
   hourly: "每小时",
@@ -369,7 +384,8 @@ export function CpaDashboard({
 }: {
   section?: SectionId;
 }) {
-  const activeSection = section;
+  const [clientSection, setClientSection] = useState<SectionId>(section);
+  const activeSection = clientSection;
   const [instances, setInstances] = useState<CpaInstance[]>([]);
   const [authGroups, setAuthGroups] = useState<
     Array<{ instance: CpaInstance; authFiles: AuthFile[] }>
@@ -434,6 +450,40 @@ export function CpaDashboard({
 
   const activeLabel =
     navItems.find((item) => item.id === activeSection)?.label ?? "CPA Nexus";
+
+  useEffect(() => {
+    function handlePopState() {
+      setClientSection(sectionFromPathname(window.location.pathname) ?? section);
+    }
+
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, [section]);
+
+  function navigateSection(
+    event: MouseEvent<HTMLAnchorElement>,
+    targetSection: SectionId,
+    href: string,
+  ) {
+    if (
+      event.metaKey ||
+      event.ctrlKey ||
+      event.shiftKey ||
+      event.altKey ||
+      event.button !== 0
+    ) {
+      return;
+    }
+
+    event.preventDefault();
+    if (targetSection !== activeSection) {
+      setClientSection(targetSection);
+      window.scrollTo({ top: 0 });
+    }
+    if (window.location.pathname !== href) {
+      window.history.pushState({ section: targetSection }, "", href);
+    }
+  }
 
   const markCpaTablesUpdating = useCallback(
     (cpaInstanceIds: number[], updating: boolean) => {
@@ -558,8 +608,20 @@ export function CpaDashboard({
   );
 
   const loadAll = useCallback(
-    async (options: { runsPage?: number; runsPageSize?: number } = {}) => {
+    async (
+      options: {
+        runsPage?: number;
+        runsPageSize?: number;
+        section?: SectionId;
+      } = {},
+    ) => {
       try {
+        const targetSection = options.section ?? activeSection;
+        const needsAuthFiles = targetSection === "auth";
+        const needsCandidatePool = targetSection === "candidate-pool";
+        const needsExceptions = targetSection === "exceptions";
+        const needsProxies =
+          targetSection === "auth" || targetSection === "proxies";
         const requestedRunsPage =
           options.runsPage ?? runsPaginationRef.current.page;
         const requestedRunsPageSize =
@@ -578,38 +640,64 @@ export function CpaDashboard({
           jobRes,
         ] = await Promise.all([
           fetchJson<{ instances: CpaInstance[] }>("/api/cpa-instances"),
-          fetchJson<{
-            groups: Array<{ instance: CpaInstance; authFiles: AuthFile[] }>;
-          }>("/api/auth-files"),
-          fetchJson<{ authFiles: CandidateAuthFile[] }>(
-            "/api/candidate-auth-files",
-          ),
-          fetchJson<{ exceptionAuthFiles: ExceptionAuthFile[] }>(
-            "/api/exception-auth-files",
-          ),
-          fetchJson<{
-            groups: Array<{ instance: CpaInstance; quotas: QuotaSnapshot[] }>;
-          }>("/api/quotas"),
-          fetchJson<{ proxies: ProxyRow[]; instances: CpaInstance[] }>(
-            "/api/proxies",
-          ),
+          needsAuthFiles
+            ? fetchJson<{
+                groups: Array<{
+                  instance: CpaInstance;
+                  authFiles: AuthFile[];
+                }>;
+              }>("/api/auth-files")
+            : Promise.resolve(null),
+          needsCandidatePool
+            ? fetchJson<{ authFiles: CandidateAuthFile[] }>(
+                "/api/candidate-auth-files",
+              )
+            : Promise.resolve(null),
+          needsExceptions
+            ? fetchJson<{ exceptionAuthFiles: ExceptionAuthFile[] }>(
+                "/api/exception-auth-files",
+              )
+            : Promise.resolve(null),
+          needsAuthFiles
+            ? fetchJson<{
+                groups: Array<{
+                  instance: CpaInstance;
+                  quotas: QuotaSnapshot[];
+                }>;
+              }>("/api/quotas")
+            : Promise.resolve(null),
+          needsProxies
+            ? fetchJson<{ proxies: ProxyRow[]; instances: CpaInstance[] }>(
+                "/api/proxies",
+              )
+            : Promise.resolve(null),
           fetchJson<JobsApiResponse>(
             `/api/jobs?${jobsSearchParams.toString()}`,
           ),
         ]);
         setInstances(instanceRes.instances);
-        setAuthGroups(authRes.groups);
-        setCandidateAuthFiles(candidateRes.authFiles);
-        setExceptionAuthFiles(exceptionRes.exceptionAuthFiles);
-        setQuotaGroups(quotaRes.groups);
-        setProxies(proxyRes.proxies);
+        if (authRes) {
+          setAuthGroups(authRes.groups);
+        }
+        if (candidateRes) {
+          setCandidateAuthFiles(candidateRes.authFiles);
+        }
+        if (exceptionRes) {
+          setExceptionAuthFiles(exceptionRes.exceptionAuthFiles);
+        }
+        if (quotaRes) {
+          setQuotaGroups(quotaRes.groups);
+        }
+        if (proxyRes) {
+          setProxies(proxyRes.proxies);
+        }
         applyJobsResponse(jobRes);
         setDataRefreshVersion((version) => version + 1);
       } catch (error) {
         toast.error(error instanceof Error ? error.message : String(error));
       }
     },
-    [applyJobsResponse],
+    [activeSection, applyJobsResponse],
   );
 
   useEffect(() => {
@@ -1533,9 +1621,12 @@ export function CpaDashboard({
               {navItems.map((item) => {
                 const Icon = item.icon;
                 return (
-                  <Link
+                  <a
                     key={item.id}
                     href={item.href}
+                    onClick={(event) =>
+                      navigateSection(event, item.id, item.href)
+                    }
                     className={cn(
                       "flex h-8 min-w-max items-center gap-1.5 rounded-md px-1.5 text-[12.5px] transition-colors",
                       activeSection === item.id
@@ -1545,7 +1636,7 @@ export function CpaDashboard({
                   >
                     <Icon className="h-3.5 w-3.5 shrink-0" />
                     {item.label}
-                  </Link>
+                  </a>
                 );
               })}
             </nav>
@@ -2890,7 +2981,7 @@ function AuthFilesSection({
         key={group.instance.id}
         aria-busy={isUpdating}
         className={cn(
-          "relative min-w-0 rounded-md border bg-card",
+          "relative min-w-0 rounded-md border bg-card [contain-intrinsic-size:360px] [content-visibility:auto]",
           isDragTarget && "border-primary/60 ring-2 ring-primary/30",
           hasOpenHeaderMenu ? "z-50 overflow-visible" : "overflow-hidden",
         )}
@@ -3224,8 +3315,8 @@ function AuthFilesSection({
             </div>
           </div>
           <div className="flex w-full flex-wrap items-center gap-x-2 gap-y-1 border-t border-border/50 pt-1.5 text-xs text-muted-foreground">
-            <HeaderAverageMeter label="5h均剩余" value={average5hRemaining} />
-            <HeaderAverageMeter label="周均剩余" value={averageWeekRemaining} />
+            <HeaderAverageMeter label="5h" value={average5hRemaining} />
+            <HeaderAverageMeter label="周" value={averageWeekRemaining} />
             <span className="text-emerald-700">{availableCount} 可用</span>
             {limitedRows.length > 0 ? (
               <span className="text-amber-700">{limitedRows.length} 限额</span>
@@ -4705,11 +4796,8 @@ function CandidatePoolSection({
               </div>
             </div>
             <div className="flex w-full flex-wrap items-center gap-x-2 gap-y-1 border-t border-border/50 pt-1.5 text-xs text-muted-foreground">
-              <HeaderAverageMeter label="5h均剩余" value={average5hRemaining} />
-              <HeaderAverageMeter
-                label="周均剩余"
-                value={averageWeekRemaining}
-              />
+              <HeaderAverageMeter label="5h" value={average5hRemaining} />
+              <HeaderAverageMeter label="周" value={averageWeekRemaining} />
               <span className="text-emerald-700">{availableCount} 可用</span>
               {limitedCount > 0 ? (
                 <span className="text-amber-700">{limitedCount} 限额</span>
@@ -5061,15 +5149,25 @@ function CandidatePoolTable({
 function buildCandidatePoolRows(rows: CandidateAuthFile[]) {
   const mapped = rows.map((row): CandidateAuthFileQuotaRow => {
     const pending = !row.lastQuotaRefreshedAt;
-    const authMetadata = candidateAuthJsonMetadata(row.rawJson);
+    const parsedAuthMetadata = candidateAuthJsonMetadata(row.rawJson);
+    const authMetadata = {
+      lastRefresh: row.lastRefresh ?? parsedAuthMetadata.lastRefresh,
+      expired: row.expired ?? parsedAuthMetadata.expired,
+      refreshToken: row.refreshToken ?? parsedAuthMetadata.refreshToken,
+    };
     const quotaStatus = pending
       ? null
-      : resolveAccountQuotaStatus({
-          disabled: false,
-          available: row.available,
-          exception: candidateQuotaException(row.statusMessage),
-          rawJson: row.quotaRawJson,
-        });
+      : row.quotaStatus
+        ? {
+            state: row.quotaStatus,
+            label: row.quotaStatusLabel ?? row.status ?? "可用",
+          }
+        : resolveAccountQuotaStatus({
+            disabled: false,
+            available: row.available,
+            exception: candidateQuotaException(row.statusMessage),
+            rawJson: row.quotaRawJson,
+          });
 
     return {
       id: row.id,
@@ -5126,7 +5224,11 @@ function CandidateTimeCell({ value }: { value: string | null }) {
   );
 }
 
-function candidateAuthJsonMetadata(rawJson: string) {
+function candidateAuthJsonMetadata(rawJson: string | null) {
+  if (!rawJson) {
+    return { lastRefresh: null, expired: null, refreshToken: null };
+  }
+
   try {
     const parsed = JSON.parse(rawJson) as unknown;
     if (!isJsonObject(parsed)) {
@@ -5660,7 +5762,7 @@ function CompactAuthFileTable({
 
   return (
     <div className="overflow-x-auto">
-      <div className="max-h-[calc(100vh-260px)] min-w-[704px] max-w-none overflow-y-auto">
+      <div className="max-h-[35.75rem] min-w-[704px] max-w-none overflow-y-auto">
         <table className="w-full min-w-[704px] table-fixed caption-bottom text-sm">
           <colgroup>
             <col />
@@ -6231,12 +6333,24 @@ function mergeAuthFilesWithQuotas(
       : quota
         ? quota.exception
         : (file.statusMessage ?? (available ? null : (file.status ?? "异常")));
-    const quotaStatus = resolveAccountQuotaStatus({
-      disabled,
-      available,
-      exception,
-      rawJson: quota?.rawJson ?? null,
-    });
+    const quotaStatus = disabled
+      ? resolveAccountQuotaStatus({
+          disabled,
+          available,
+          exception,
+          rawJson: null,
+        })
+      : quota?.quotaStatus
+        ? {
+            state: quota.quotaStatus,
+            label: quota.quotaStatusLabel ?? quota.quotaStatus,
+          }
+        : resolveAccountQuotaStatus({
+            disabled,
+            available,
+            exception,
+            rawJson: quota?.rawJson ?? null,
+          });
 
     return {
       id: file.id,
