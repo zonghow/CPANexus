@@ -428,6 +428,70 @@ describe("/api/auth-files/[id]", () => {
     });
   });
 
+  it("portals an auth file into the candidate pool and removes it from the source CPA", async () => {
+    const sqlite = await setupSqlite();
+    const sourceId = insertInstance(sqlite, {
+      name: "source",
+      baseUrl: "https://source.example.com",
+    });
+    const authFileId = insertAuthFile(sqlite, sourceId);
+    insertQuotaSnapshot(sqlite, sourceId);
+
+    const cpaClient = await import("@/lib/cpa-client");
+    const jobs = await import("@/lib/jobs");
+    vi.mocked(cpaClient.downloadRemoteAuthFile).mockResolvedValue({
+      email: "remote@example.com",
+      refresh_token: "rt_remote",
+      type: "codex",
+    });
+    vi.mocked(cpaClient.deleteRemoteAuthFile).mockResolvedValue(undefined);
+    vi.mocked(jobs.syncCpaInstanceById).mockResolvedValue({
+      instance: "source",
+      status: "success",
+      message: "synced",
+    });
+    const route = await import("./route");
+
+    const response = await route.POST(
+      new Request("http://localhost/api/auth-files/1", {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ action: "portalCandidate" }),
+      }),
+      { params: Promise.resolve({ id: String(authFileId) }) },
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ status: "ok" });
+    expect(cpaClient.downloadRemoteAuthFile).toHaveBeenCalledWith(
+      expect.objectContaining({ id: sourceId }),
+      "codex-a@example.com-auto.json",
+    );
+    expect(cpaClient.deleteRemoteAuthFile).toHaveBeenCalledWith(
+      expect.objectContaining({ id: sourceId }),
+      "codex-a@example.com-auto.json",
+    );
+    expect(jobs.syncCpaInstanceById).toHaveBeenCalledWith(sourceId);
+    expect(sqlite.prepare("SELECT COUNT(*) AS count FROM auth_files").get()).toMatchObject({ count: 0 });
+    expect(sqlite.prepare("SELECT COUNT(*) AS count FROM quota_snapshots").get()).toMatchObject({ count: 0 });
+    expect(
+      sqlite
+        .prepare("SELECT file_name, email, provider, status, status_message, raw_json FROM candidate_auth_files")
+        .get(),
+    ).toMatchObject({
+      file_name: "codex-a@example.com-auto.json",
+      email: "a@example.com",
+      provider: "codex",
+      status: "待刷新",
+      status_message: null,
+      raw_json: JSON.stringify({
+        email: "remote@example.com",
+        refresh_token: "rt_remote",
+        type: "codex",
+      }),
+    });
+  });
+
   it("does not portal an auth file when remote download fails and local raw_json is unavailable", async () => {
     const sqlite = await setupSqlite();
     const sourceId = insertInstance(sqlite, {

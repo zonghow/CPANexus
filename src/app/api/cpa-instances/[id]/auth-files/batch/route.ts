@@ -24,13 +24,21 @@ import {
   syncCpaInstanceById,
   type CpaInstanceSyncResult,
 } from "@/lib/jobs";
+import { portalAuthFileToCandidatePool } from "@/lib/candidate-auth-import";
 import { portalAuthFileToExceptionPool } from "@/lib/exception-auth-files";
 import { extractSubscriptionType, isFreeSubscriptionType } from "@/lib/subscription";
 import { buildZipArchive } from "@/lib/zip";
 
 export const runtime = "nodejs";
 
-type BatchAction = "delete" | "disable" | "autoAssignProxy" | "download" | "move" | "portalExceptions";
+type BatchAction =
+  | "delete"
+  | "disable"
+  | "autoAssignProxy"
+  | "download"
+  | "move"
+  | "portalExceptions"
+  | "portalCandidates";
 type BatchTarget = "selected" | "free";
 
 export async function POST(
@@ -61,9 +69,10 @@ export async function POST(
       body.action !== "autoAssignProxy" &&
       body.action !== "download" &&
       body.action !== "move" &&
-      body.action !== "portalExceptions"
+      body.action !== "portalExceptions" &&
+      body.action !== "portalCandidates"
     ) {
-      return badRequest("action must be delete, disable, autoAssignProxy, download, move, or portalExceptions");
+      return badRequest("action must be delete, disable, autoAssignProxy, download, move, portalExceptions, or portalCandidates");
     }
     if (body.target !== undefined && body.target !== "selected" && body.target !== "free") {
       return badRequest("target must be selected or free");
@@ -148,6 +157,23 @@ export async function POST(
 
       for (const authFile of rows) {
         await portalAuthFileToExceptionPool(instance, authFile);
+      }
+
+      return okWithOptionalSync({
+        action: body.action,
+        processed: rows.length,
+        sync: await syncAffectedCpaInstance(cpaInstanceId),
+      });
+    }
+
+    if (body.action === "portalCandidates") {
+      const rows = loadSelectedAuthFiles(cpaInstanceId, body.authFileIds);
+      if (rows instanceof Response) {
+        return rows;
+      }
+
+      for (const authFile of rows) {
+        await portalAuthFileToCandidatePool(instance, authFile);
       }
 
       return okWithOptionalSync({

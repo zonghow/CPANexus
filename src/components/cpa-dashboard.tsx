@@ -239,7 +239,11 @@ type JobsApiResponse = {
   runsPagination: JobRunsPagination;
 };
 
-type BatchExceptionAction = "delete" | "disable" | "portalExceptions";
+type BatchExceptionAction =
+  | "delete"
+  | "disable"
+  | "portalExceptions"
+  | "portalCandidates";
 type BatchAuthFileTarget = "selected" | "free";
 type AuthExchangeMode = "download" | "move";
 
@@ -1378,6 +1382,22 @@ export function CpaDashboard({
     }
   }
 
+  async function portalCandidateAuthFile(id: number) {
+    const sourceCpaInstanceId = findAuthFileCpaInstanceId(id);
+    try {
+      await withUpdatingCpaTables([sourceCpaInstanceId], async () => {
+        await mutate(`/api/auth-files/${id}`, {
+          method: "POST",
+          body: JSON.stringify({ action: "portalCandidate" }),
+        });
+        toast.success("账号已移动到候补号池");
+        await loadAll();
+      });
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error));
+    }
+  }
+
   async function deleteExceptionAuthFile(id: number) {
     try {
       await mutate(`/api/exception-auth-files/${id}`, { method: "DELETE" });
@@ -1706,6 +1726,7 @@ export function CpaDashboard({
                 nowMs={nowMs}
                 onDeleteAuthFile={deleteAuthFile}
                 onPortalExceptionAuthFile={portalExceptionAuthFile}
+                onPortalCandidateAuthFile={portalCandidateAuthFile}
                 onMoveAuthFile={moveAuthFile}
                 onToggleAuthFileDisabled={toggleAuthFileDisabled}
                 onConfigureAuthFileProxy={configureAuthFileProxy}
@@ -2070,6 +2091,7 @@ function AuthFilesSection({
   nowMs,
   onDeleteAuthFile,
   onPortalExceptionAuthFile,
+  onPortalCandidateAuthFile,
   onMoveAuthFile,
   onToggleAuthFileDisabled,
   onConfigureAuthFileProxy,
@@ -2094,6 +2116,7 @@ function AuthFilesSection({
   nowMs: number;
   onDeleteAuthFile: (id: number) => Promise<void>;
   onPortalExceptionAuthFile: (id: number) => Promise<void>;
+  onPortalCandidateAuthFile: (id: number) => Promise<void>;
   onMoveAuthFile: (id: number, targetCpaInstanceId: number) => Promise<void>;
   onToggleAuthFileDisabled: (id: number, disabled: boolean) => Promise<void>;
   onConfigureAuthFileProxy: (
@@ -3332,6 +3355,9 @@ function AuthFilesSection({
           onRequestDelete={setDeleteTarget}
           onRequestPortalException={(row) =>
             void onPortalExceptionAuthFile(row.id)
+          }
+          onRequestPortalCandidate={(row) =>
+            void onPortalCandidateAuthFile(row.id)
           }
           onRequestMove={openMoveDialog}
           onRequestConfigureProxy={openProxyDialog}
@@ -5713,6 +5739,7 @@ function CompactAuthFileTable({
   canMove,
   onRequestDelete,
   onRequestPortalException,
+  onRequestPortalCandidate,
   onRequestMove,
   onRequestConfigureProxy,
   onToggleDisabled,
@@ -5723,6 +5750,7 @@ function CompactAuthFileTable({
   canMove: boolean;
   onRequestDelete: (row: AuthFileQuotaRow) => void;
   onRequestPortalException: (row: AuthFileQuotaRow) => void;
+  onRequestPortalCandidate: (row: AuthFileQuotaRow) => void;
   onRequestMove: (row: AuthFileQuotaRow) => void;
   onRequestConfigureProxy: (row: AuthFileQuotaRow) => void;
   onToggleDisabled: (id: number, disabled: boolean) => Promise<void>;
@@ -5907,7 +5935,7 @@ function CompactAuthFileTable({
                           setActionMenuPosition(
                             getFloatingMenuPosition(rect, {
                               menuWidth: 128,
-                              menuHeight: 202,
+                              menuHeight: 232,
                               viewportWidth: window.innerWidth,
                               viewportHeight: window.innerHeight,
                             }),
@@ -5984,6 +6012,17 @@ function CompactAuthFileTable({
                                 }}
                               >
                                 删除
+                              </button>
+                              <button
+                                type="button"
+                                role="menuitem"
+                                className="flex w-full items-center rounded px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground"
+                                onClick={() => {
+                                  setOpenActionRowId(null);
+                                  onRequestPortalCandidate(row);
+                                }}
+                              >
+                                去候补
                               </button>
                               <button
                                 type="button"

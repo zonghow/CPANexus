@@ -149,6 +149,73 @@ describe("/api/cpa-instances/[id]/auth-files/batch", () => {
     ]);
   });
 
+  it("portals selected auth files into the candidate pool", async () => {
+    const sqlite = await setupSqlite();
+    const cpaInstanceId = insertInstance(sqlite);
+    const firstId = insertAuthFile(sqlite, cpaInstanceId, "codex-first@example.com-auto.json");
+    const secondId = insertAuthFile(sqlite, cpaInstanceId, "codex-second@example.com-auto.json", {
+      rawJson: JSON.stringify({ email: "second@example.com", token: "local-token", type: "codex" }),
+    });
+    insertQuotaSnapshot(sqlite, cpaInstanceId, "codex-first@example.com-auto.json");
+    insertQuotaSnapshot(sqlite, cpaInstanceId, "codex-second@example.com-auto.json");
+
+    const cpaClient = await import("@/lib/cpa-client");
+    const jobs = await import("@/lib/jobs");
+    vi.mocked(cpaClient.downloadRemoteAuthFile)
+      .mockResolvedValueOnce({ email: "first@example.com", token: "remote-token", type: "codex" })
+      .mockRejectedValueOnce(new Error("download failed"));
+    vi.mocked(cpaClient.deleteRemoteAuthFile).mockResolvedValue(undefined);
+    vi.mocked(jobs.syncCpaInstanceById).mockResolvedValue({
+      instance: "target",
+      status: "success",
+      message: "synced",
+    });
+    const route = await import("./route");
+
+    const response = await route.POST(
+      new Request("http://localhost/api/cpa-instances/1/auth-files/batch", {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({
+          action: "portalCandidates",
+          authFileIds: [firstId, secondId],
+        }),
+      }),
+      { params: Promise.resolve({ id: String(cpaInstanceId) }) },
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      status: "ok",
+      processed: 2,
+      action: "portalCandidates",
+    });
+    expect(cpaClient.deleteRemoteAuthFile).toHaveBeenCalledTimes(2);
+    expect(jobs.syncCpaInstanceById).toHaveBeenCalledTimes(1);
+    expect(sqlite.prepare("SELECT COUNT(*) AS count FROM auth_files").get()).toMatchObject({ count: 0 });
+    expect(sqlite.prepare("SELECT COUNT(*) AS count FROM quota_snapshots").get()).toMatchObject({ count: 0 });
+    expect(
+      sqlite.prepare("SELECT file_name, email, provider, status, status_message, raw_json FROM candidate_auth_files ORDER BY file_name").all(),
+    ).toEqual([
+      {
+        file_name: "codex-first@example.com-auto.json",
+        email: "first@example.com",
+        provider: "codex",
+        status: "待刷新",
+        status_message: null,
+        raw_json: JSON.stringify({ email: "first@example.com", token: "remote-token", type: "codex" }),
+      },
+      {
+        file_name: "codex-second@example.com-auto.json",
+        email: "second@example.com",
+        provider: "codex",
+        status: "待刷新",
+        status_message: null,
+        raw_json: JSON.stringify({ email: "second@example.com", token: "local-token", type: "codex" }),
+      },
+    ]);
+  });
+
   it("disables selected auth files through CPA status endpoint, then syncs once", async () => {
     const sqlite = await setupSqlite();
     const cpaInstanceId = insertInstance(sqlite);
