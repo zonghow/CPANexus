@@ -1,6 +1,6 @@
 {
   "name": "cpa-nexus",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "private": true,
   "scripts": {
     "dev": "tsx src/server/dev.ts",

@@ -136,7 +136,7 @@ Create `docker-compose.yml`:
 ```yaml
 services:
   web:
-    image: ${CPA_NEXUS_IMAGE:-zonghao/cpa-nexus:0.1.13-amd64}
+    image: ${CPA_NEXUS_IMAGE:-zonghao/cpa-nexus:0.1.14-amd64}
     command: npm run start
     environment:
       DATABASE_URL: file:/app/data/cpa-nexus.db
@@ -150,7 +150,7 @@ services:
     restart: unless-stopped
 
   worker:
-    image: ${CPA_NEXUS_IMAGE:-zonghao/cpa-nexus:0.1.13-amd64}
+    image: ${CPA_NEXUS_IMAGE:-zonghao/cpa-nexus:0.1.14-amd64}
     command: npm run worker
     environment:
       DATABASE_URL: file:/app/data/cpa-nexus.db
@@ -189,21 +189,21 @@ change the port mapping to `"9527:3000"`.
 The current versioned image is:
 
 ```bash
-zonghao/cpa-nexus:0.1.13-amd64
+zonghao/cpa-nexus:0.1.14-amd64
 ```
 
 Use a specific image with Docker Compose:
 
 ```bash
-CPA_NEXUS_IMAGE=zonghao/cpa-nexus:0.1.13-amd64 docker compose pull
-CPA_NEXUS_IMAGE=zonghao/cpa-nexus:0.1.13-amd64 docker compose up -d
+CPA_NEXUS_IMAGE=zonghao/cpa-nexus:0.1.14-amd64 docker compose pull
+CPA_NEXUS_IMAGE=zonghao/cpa-nexus:0.1.14-amd64 docker compose up -d
 ```
 
 Build and push a new Linux amd64 image from your local machine:
 
 ```bash
 docker buildx build --platform linux/amd64 \
-  -t zonghao/cpa-nexus:0.1.13-amd64 \
+  -t zonghao/cpa-nexus:0.1.14-amd64 \
   --push .
 ```
 

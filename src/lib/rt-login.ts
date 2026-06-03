@@ -66,7 +66,7 @@ export function parseRtLoginLines(text: string) {
       const segments = line.split("----").map((segment) => segment.trim());
       const refreshToken =
         segments.find((segment) => refreshTokenRegex.test(segment))?.match(refreshTokenRegex)?.[0] ??
-        line.match(refreshTokenRegex)?.[0] ??
+        (segments.length >= 4 ? segments.at(-1) : line.includes("----") ? "" : line) ??
         "";
       if (!refreshToken) {
         invalid.push({

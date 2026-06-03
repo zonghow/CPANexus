@@ -2826,7 +2826,7 @@ function AuthFilesSection({
       const message =
         parsed.valid.length === 0
           ? "请输入至少一条有效 RT"
-          : `${invalidLines} 格式不正确，请确认每行包含 rt_ 开头的 refresh token`;
+          : `${invalidLines} 格式不正确，请确认每行是一条 RT，或使用邮箱----密码----x----RT`;
       setRtLogin((current) =>
         current ? { ...current, error: message } : current,
       );
@@ -3698,7 +3698,7 @@ function AuthFilesSection({
                 <Textarea
                   id="rt-login-input"
                   value={rtLogin.text}
-                  placeholder="一行一条，可以是邮箱----密码----x----rt_xxx，也可以只有 rt_xxx"
+                  placeholder="一行一条，可以是邮箱----密码----x----RT，也可以只有 RT"
                   className={cn(
                     "min-h-44 w-full resize-y font-mono text-xs focus-visible:ring-1",
                     rtLogin.error &&
@@ -6228,7 +6228,7 @@ function parseRtLoginInput(text: string) {
         segments
           .find((segment) => rtLoginRefreshTokenRegex.test(segment))
           ?.match(rtLoginRefreshTokenRegex)?.[0] ??
-        line.match(rtLoginRefreshTokenRegex)?.[0] ??
+        (segments.length >= 4 ? segments.at(-1) : line.includes("----") ? "" : line) ??
         "";
       if (!refreshToken) {
         invalid.push({ lineNumber: index + 1, sourceLine: line });

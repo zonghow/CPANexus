@@ -8,10 +8,11 @@ import {
 } from "./rt-login";
 
 describe("parseRtLoginLines", () => {
-  it("accepts dashed credential rows and raw rt-only rows", () => {
+  it("accepts dashed credential rows and raw token rows", () => {
     const result = parseRtLoginLines([
       "person@example.com----password----x----rt_dash_token",
-      "rt_only_token",
+      "plain_refresh_token_without_rt_prefix",
+      "other@example.com----password----x----plain_dashed_token",
     ].join("\n"));
 
     expect(result.invalid).toEqual([]);
@@ -24,26 +25,34 @@ describe("parseRtLoginLines", () => {
       },
       {
         lineNumber: 2,
-        sourceLine: "rt_only_token",
+        sourceLine: "plain_refresh_token_without_rt_prefix",
         email: null,
-        refreshToken: "rt_only_token",
+        refreshToken: "plain_refresh_token_without_rt_prefix",
+      },
+      {
+        lineNumber: 3,
+        sourceLine: "other@example.com----password----x----plain_dashed_token",
+        email: "other@example.com",
+        refreshToken: "plain_dashed_token",
       },
     ]);
   });
 
-  it("reports rows without a refresh token", () => {
+  it("reports incomplete dashed rows without a refresh token", () => {
     const result = parseRtLoginLines("bad@example.com----password\nnot a token");
 
-    expect(result.valid).toEqual([]);
+    expect(result.valid).toEqual([
+      {
+        lineNumber: 2,
+        sourceLine: "not a token",
+        email: null,
+        refreshToken: "not a token",
+      },
+    ]);
     expect(result.invalid).toEqual([
       {
         lineNumber: 1,
         sourceLine: "bad@example.com----password",
-        reason: "missing refresh token",
-      },
-      {
-        lineNumber: 2,
-        sourceLine: "not a token",
         reason: "missing refresh token",
       },
     ]);
