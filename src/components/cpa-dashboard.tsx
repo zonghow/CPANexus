@@ -6,6 +6,7 @@ import {
   ArchiveX,
   BarChart3,
   Bell,
+  Check,
   ChevronLeft,
   ChevronRight,
   Copy,
@@ -13,6 +14,8 @@ import {
   Download,
   ExternalLink,
   FileKey2,
+  Info,
+  ListChecks,
   Loader2,
   LogOut,
   LogIn,
@@ -2228,6 +2231,9 @@ function AuthFilesSection({
   } | null>(null);
   const [dragTargetCpaId, setDragTargetCpaId] = useState<number | null>(null);
   const [useDesktopMasonry, setUseDesktopMasonry] = useState(false);
+  const [selectedAuthFileIds, setSelectedAuthFileIds] = useState<Set<number>>(
+    new Set(),
+  );
   const loginMenuRef = useRef<HTMLDivElement | null>(null);
   const bulkMenuRef = useRef<HTMLDivElement | null>(null);
   const exchangeMenuRef = useRef<HTMLDivElement | null>(null);
@@ -2974,6 +2980,28 @@ function AuthFilesSection({
     );
     const freeAuthFileIds = freeRows.map((row) => row.id);
     const activeFreeAuthFileIds = activeFreeRows.map((row) => row.id);
+    const hasSelection = rows.some((r) => selectedAuthFileIds.has(r.id));
+    const selectedInGroupIds = rows
+      .filter((r) => selectedAuthFileIds.has(r.id))
+      .map((r) => r.id);
+    const multiSelectExceptionIds = hasSelection
+      ? [...selectedAuthFileIds].filter((id) =>
+          exceptionAuthFileIds.includes(id),
+        )
+      : exceptionAuthFileIds;
+    const multiSelectFreeIds = hasSelection
+      ? [...selectedAuthFileIds].filter((id) => freeAuthFileIds.includes(id))
+      : freeAuthFileIds;
+    const multiSelectActiveFreeIds = hasSelection
+      ? [...selectedAuthFileIds].filter((id) =>
+          activeFreeAuthFileIds.includes(id),
+        )
+      : activeFreeAuthFileIds;
+    const multiSelectDisabledIds = hasSelection
+      ? [...selectedAuthFileIds].filter((id) =>
+          disabledAuthFileIds.includes(id),
+        )
+      : disabledAuthFileIds;
     const disabledCount = disabledRows.length;
     const exceptionCount = exceptionRows.length;
     const availableCount = activeRows.filter(
@@ -3209,14 +3237,17 @@ function AuthFilesSection({
                     }}
                   >
                     自动分配代理
+                    {hasSelection ? "(已选)" : ""}
                   </button>
                   <Separator className="my-1" />
                   <button
                     type="button"
-                    disabled={exceptionAuthFileIds.length === 0}
+                    disabled={multiSelectExceptionIds.length === 0}
                     title={
-                      exceptionAuthFileIds.length === 0
-                        ? "暂无异常账号"
+                      multiSelectExceptionIds.length === 0
+                        ? hasSelection
+                          ? "所选账号中无异常账号"
+                          : "暂无异常账号"
                         : undefined
                     }
                     className="flex w-full items-center rounded px-2 py-1.5 text-left text-xs text-rose-700 hover:bg-rose-50 hover:text-rose-800 disabled:pointer-events-none disabled:opacity-45"
@@ -3225,22 +3256,28 @@ function AuthFilesSection({
                       setBulkExceptionTarget({
                         instance: group.instance,
                         action: "portalExceptions",
-                        authFileIds: exceptionAuthFileIds,
-                        title: "批量清理异常账号",
-                        subject: "异常账号",
+                        authFileIds: multiSelectExceptionIds,
+                        title: hasSelection
+                          ? `批量清理 ${multiSelectExceptionIds.length} 个选中账号`
+                          : "批量清理异常账号",
+                        subject: hasSelection ? "选中账号" : "异常账号",
                         confirmVerb: "清理",
                         successVerb: "已清理到异常账号",
                       });
+
                     }}
                   >
                     批量清理异常账号
+                    {hasSelection ? "(已选)" : ""}
                   </button>
                   <button
                     type="button"
-                    disabled={exceptionAuthFileIds.length === 0}
+                    disabled={multiSelectExceptionIds.length === 0}
                     title={
-                      exceptionAuthFileIds.length === 0
-                        ? "暂无异常账号"
+                      multiSelectExceptionIds.length === 0
+                        ? hasSelection
+                          ? "所选账号中无异常账号"
+                          : "暂无异常账号"
                         : undefined
                     }
                     className="flex w-full items-center rounded px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-45"
@@ -3249,22 +3286,30 @@ function AuthFilesSection({
                       setBulkExceptionTarget({
                         instance: group.instance,
                         action: "disable",
-                        authFileIds: exceptionAuthFileIds,
-                        title: "批量停用异常账号",
-                        subject: "异常账号",
+                        authFileIds: multiSelectExceptionIds,
+                        title: hasSelection
+                          ? `批量停用 ${multiSelectExceptionIds.length} 个选中账号`
+                          : "批量停用异常账号",
+                        subject: hasSelection ? "选中账号" : "异常账号",
                         confirmVerb: "停用",
                         successVerb: "已停用",
                       });
+
                     }}
                   >
                     批量停用异常账号
+                    {hasSelection ? "(已选)" : ""}
                   </button>
                   <Separator className="my-1" />
                   <button
                     type="button"
-                    disabled={freeAuthFileIds.length === 0}
+                    disabled={multiSelectFreeIds.length === 0}
                     title={
-                      freeAuthFileIds.length === 0 ? "暂无 Free 号" : undefined
+                      multiSelectFreeIds.length === 0
+                        ? hasSelection
+                          ? "所选账号中无 Free 号"
+                          : "暂无 Free 号"
+                        : undefined
                     }
                     className="flex w-full items-center rounded px-2 py-1.5 text-left text-xs text-rose-700 hover:bg-rose-50 hover:text-rose-800 disabled:pointer-events-none disabled:opacity-45"
                     onClick={() => {
@@ -3272,23 +3317,29 @@ function AuthFilesSection({
                       setBulkExceptionTarget({
                         instance: group.instance,
                         action: "delete",
-                        authFileIds: freeAuthFileIds,
-                        title: "批量清理Free号",
-                        subject: "Free号",
+                        authFileIds: multiSelectFreeIds,
+                        title: hasSelection
+                          ? `批量清理 ${multiSelectFreeIds.length} 个选中账号`
+                          : "批量清理Free号",
+                        subject: hasSelection ? "选中账号" : "Free号",
                         confirmVerb: "清理",
                         successVerb: "已清理",
-                        target: "free",
+                        target: hasSelection ? "selected" : "free",
                       });
+
                     }}
                   >
                     批量清理Free号
+                    {hasSelection ? "(已选)" : ""}
                   </button>
                   <button
                     type="button"
-                    disabled={activeFreeAuthFileIds.length === 0}
+                    disabled={multiSelectActiveFreeIds.length === 0}
                     title={
-                      activeFreeAuthFileIds.length === 0
-                        ? "暂无可停用 Free 号"
+                      multiSelectActiveFreeIds.length === 0
+                        ? hasSelection
+                          ? "所选账号中无可用 Free 号"
+                          : "暂无可停用 Free 号"
                         : undefined
                     }
                     className="flex w-full items-center rounded px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-45"
@@ -3297,24 +3348,30 @@ function AuthFilesSection({
                       setBulkExceptionTarget({
                         instance: group.instance,
                         action: "disable",
-                        authFileIds: activeFreeAuthFileIds,
-                        title: "批量停用Free号",
-                        subject: "Free号",
+                        authFileIds: multiSelectActiveFreeIds,
+                        title: hasSelection
+                          ? `批量停用 ${multiSelectActiveFreeIds.length} 个选中账号`
+                          : "批量停用Free号",
+                        subject: hasSelection ? "选中账号" : "Free号",
                         confirmVerb: "停用",
                         successVerb: "已停用",
-                        target: "free",
+                        target: hasSelection ? "selected" : "free",
                       });
+
                     }}
                   >
                     批量停用Free号
+                    {hasSelection ? "(已选)" : ""}
                   </button>
                   <Separator className="my-1" />
                   <button
                     type="button"
-                    disabled={disabledAuthFileIds.length === 0}
+                    disabled={multiSelectDisabledIds.length === 0}
                     title={
-                      disabledAuthFileIds.length === 0
-                        ? "暂无已停用账号"
+                      multiSelectDisabledIds.length === 0
+                        ? hasSelection
+                          ? "所选账号中无已停用账号"
+                          : "暂无已停用账号"
                         : undefined
                     }
                     className="flex w-full items-center rounded px-2 py-1.5 text-left text-xs text-rose-700 hover:bg-rose-50 hover:text-rose-800 disabled:pointer-events-none disabled:opacity-45"
@@ -3323,15 +3380,19 @@ function AuthFilesSection({
                       setBulkExceptionTarget({
                         instance: group.instance,
                         action: "delete",
-                        authFileIds: disabledAuthFileIds,
-                        title: "批量删除已停用账号",
-                        subject: "已停用账号",
+                        authFileIds: multiSelectDisabledIds,
+                        title: hasSelection
+                          ? `批量删除 ${multiSelectDisabledIds.length} 个选中账号`
+                          : "批量删除已停用账号",
+                        subject: hasSelection ? "选中账号" : "已停用账号",
                         confirmVerb: "删除",
                         successVerb: "已删除",
                       });
+
                     }}
                   >
                     批量删除已停用账号
+                    {hasSelection ? "(已选)" : ""}
                   </button>
                 </div>
               ) : null}
@@ -3351,18 +3412,23 @@ function AuthFilesSection({
         <CompactAuthFileTable
           rows={rows}
           nowMs={nowMs}
-          canMove={enabledInstances.length > 1}
-          onRequestDelete={setDeleteTarget}
-          onRequestPortalException={(row) =>
-            void onPortalExceptionAuthFile(row.id)
-          }
-          onRequestPortalCandidate={(row) =>
-            void onPortalCandidateAuthFile(row.id)
-          }
-          onRequestMove={openMoveDialog}
-          onRequestConfigureProxy={openProxyDialog}
-          onToggleDisabled={onToggleAuthFileDisabled}
-          onRefreshQuota={onRefreshAuthFileQuota}
+          selectedIds={selectedAuthFileIds}
+          onToggleSelect={(id) => {
+            const next = new Set(selectedAuthFileIds);
+            if (next.has(id)) {
+              next.delete(id);
+            } else {
+              next.add(id);
+            }
+            setSelectedAuthFileIds(next);
+          }}
+          onToggleSelectAll={() => {
+            if (selectedAuthFileIds.size === rows.length) {
+              setSelectedAuthFileIds(new Set());
+            } else {
+              setSelectedAuthFileIds(new Set(rows.map((r) => r.id)));
+            }
+          }}
         />
         {isDragTarget ? (
           <div className="pointer-events-none absolute inset-0 z-[55] flex items-center justify-center bg-background/75 backdrop-blur-[1px]">
@@ -3376,9 +3442,151 @@ function AuthFilesSection({
           <div className="absolute inset-0 z-40 flex items-center justify-center bg-background/70 backdrop-blur-[1px]">
             <div className="flex items-center gap-2 rounded-md border bg-card px-3 py-2 text-sm font-medium shadow-sm">
               <Loader2 className="h-4 w-4 animate-spin text-primary" />
-              正在更新
+               正在更新
             </div>
           </div>
+        ) : null}
+        {hasSelection ? (
+          <div className="border-t border-border/50 px-3 py-2">
+          {hasSelection ? (
+            <div className="flex flex-wrap items-center gap-1.5">
+              <Button
+                type="button"
+                size="xs"
+                variant="outline"
+                onClick={() => setSelectedAuthFileIds(new Set())}
+              >
+                取消选择
+              </Button>
+              <span className="mr-1 text-xs text-muted-foreground">
+                已选 {selectedInGroupIds.length} 个
+              </span>
+              <Button
+                type="button"
+                size="xs"
+                variant="outline"
+                onClick={() => {
+                  selectedInGroupIds.forEach((id) =>
+                    void onRefreshAuthFileQuota(id),
+                  );
+                }}
+              >
+                <RefreshCw className="h-3 w-3" />
+                刷新配额
+              </Button>
+              <Button
+                type="button"
+                size="xs"
+                variant="outline"
+                onClick={() => {
+                  const selectedRows = rows.filter((r) =>
+                    selectedAuthFileIds.has(r.id),
+                  );
+                  if (selectedRows.length > 0) {
+                    const next = !selectedRows[0].disabled;
+                    selectedInGroupIds.forEach((id) =>
+                      void onToggleAuthFileDisabled(id, next),
+                    );
+                  }
+                }}
+              >
+                {rows.some(
+                  (r) => selectedAuthFileIds.has(r.id) && r.disabled,
+                )
+                  ? "启用"
+                  : "停用"}
+              </Button>
+              <Button
+                type="button"
+                size="xs"
+                variant="outline"
+                disabled={!hasAssignableProxy}
+                onClick={() => {
+                  const selectedRows = rows.filter((r) =>
+                    selectedAuthFileIds.has(r.id),
+                  );
+                  if (selectedRows.length > 0) {
+                    openProxyDialog(selectedRows[0]);
+                  }
+                }}
+              >
+                配置代理
+              </Button>
+              <Button
+                type="button"
+                size="xs"
+                variant="outline"
+                disabled={enabledInstances.length <= 1}
+                onClick={() => {
+                  const selectedRows = rows.filter((r) =>
+                    selectedAuthFileIds.has(r.id),
+                  );
+                  if (selectedRows.length > 0) {
+                    openMoveDialog(selectedRows[0]);
+                  }
+                }}
+              >
+                移动到
+              </Button>
+              <Button
+                type="button"
+                size="xs"
+                variant="outline"
+                onClick={() => {
+                  setBulkExceptionTarget({
+                    instance: group.instance,
+                    action: "portalCandidates",
+                    authFileIds: selectedInGroupIds,
+                    title: `批量去候补 ${selectedInGroupIds.length} 个账号`,
+                    subject: "选中账号",
+                    confirmVerb: "去候补",
+                    successVerb: "已设为候补",
+                  });
+                }}
+              >
+                去候补
+              </Button>
+              <Button
+                type="button"
+                size="xs"
+                variant="outline"
+                onClick={() => {
+                  setBulkExceptionTarget({
+                    instance: group.instance,
+                    action: "portalExceptions",
+                    authFileIds: selectedInGroupIds,
+                    title: `批量清理 ${selectedInGroupIds.length} 个选中账号`,
+                    subject: "选中账号",
+                    confirmVerb: "清理",
+                    successVerb: "已清理到异常账号",
+                  });
+                }}
+              >
+                清理
+              </Button>
+              <Button
+                type="button"
+                size="xs"
+                variant="outline"
+                className="text-rose-700 hover:bg-rose-50 hover:text-rose-800"
+                onClick={() => {
+                  setBulkExceptionTarget({
+                    instance: group.instance,
+                    action: "delete",
+                    authFileIds: selectedInGroupIds,
+                    title: `批量删除 ${selectedInGroupIds.length} 个选中账号`,
+                    subject: "选中账号",
+                    confirmVerb: "删除",
+                    successVerb: "已删除",
+                    target: "selected",
+                  });
+                }}
+              >
+                删除
+              </Button>
+            </div>
+          ) : null}
+        </div>
         ) : null}
       </div>
     );
@@ -4744,8 +4952,8 @@ function CandidatePoolSection({
                           刷新配额（不刷新RT）
                         </button>
                       </div>
-                    ) : null}
-                  </div>
+        ) : null}
+      </div>
                 </>
               ) : null}
               <Button
@@ -5736,58 +5944,16 @@ type AuthFileQuotaRow = {
 function CompactAuthFileTable({
   rows,
   nowMs,
-  canMove,
-  onRequestDelete,
-  onRequestPortalException,
-  onRequestPortalCandidate,
-  onRequestMove,
-  onRequestConfigureProxy,
-  onToggleDisabled,
-  onRefreshQuota,
+  selectedIds,
+  onToggleSelect,
+  onToggleSelectAll,
 }: {
   rows: AuthFileQuotaRow[];
   nowMs: number;
-  canMove: boolean;
-  onRequestDelete: (row: AuthFileQuotaRow) => void;
-  onRequestPortalException: (row: AuthFileQuotaRow) => void;
-  onRequestPortalCandidate: (row: AuthFileQuotaRow) => void;
-  onRequestMove: (row: AuthFileQuotaRow) => void;
-  onRequestConfigureProxy: (row: AuthFileQuotaRow) => void;
-  onToggleDisabled: (id: number, disabled: boolean) => Promise<void>;
-  onRefreshQuota: (id: number) => Promise<void>;
+  selectedIds?: Set<number>;
+  onToggleSelect?: (id: number) => void;
+  onToggleSelectAll?: () => void;
 }) {
-  const [openActionRowId, setOpenActionRowId] = useState<number | null>(null);
-  const [actionMenuPosition, setActionMenuPosition] = useState({
-    left: 0,
-    top: 0,
-  });
-  const actionTriggerRef = useRef<HTMLButtonElement | null>(null);
-  const actionMenuRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    if (openActionRowId === null) {
-      return;
-    }
-
-    function closeOnOutsidePointerDown(event: PointerEvent) {
-      const target = event.target;
-      if (target instanceof Node && actionMenuRef.current?.contains(target)) {
-        return;
-      }
-      if (
-        target instanceof Node &&
-        actionTriggerRef.current?.contains(target)
-      ) {
-        return;
-      }
-      setOpenActionRowId(null);
-    }
-
-    document.addEventListener("pointerdown", closeOnOutsidePointerDown);
-    return () =>
-      document.removeEventListener("pointerdown", closeOnOutsidePointerDown);
-  }, [openActionRowId]);
-
   return (
     <div className="overflow-x-auto">
       <div className="max-h-[35.75rem] min-w-[704px] max-w-none overflow-y-auto">
@@ -5799,12 +5965,24 @@ function CompactAuthFileTable({
             <col style={{ width: 64 }} />
             <col style={{ width: 64 }} />
             <col style={{ width: 80 }} />
-            <col style={{ width: 44 }} />
           </colgroup>
           <TableHeader>
             <TableRow className="h-8">
               <TableHead className="sticky top-0 z-10 bg-card px-3 py-1 text-xs shadow-[0_1px_0_var(--border)]">
-                账号
+                <div className="flex items-center gap-2">
+                  <Checkbox
+                    checked={
+                      selectedIds
+                        ? selectedIds.size === rows.length &&
+                          rows.length > 0
+                        : false
+                    }
+                    onCheckedChange={() =>
+                      onToggleSelectAll?.()
+                    }
+                  />
+                  账号
+                </div>
               </TableHead>
               <TableHead className="sticky top-0 z-10 w-24 bg-card px-2 py-1 text-xs shadow-[0_1px_0_var(--border)]">
                 <CompactPercentHeader windowLabel="5h" />
@@ -5821,16 +5999,13 @@ function CompactAuthFileTable({
               <TableHead className="sticky top-0 z-10 w-20 bg-card px-2 py-1 text-xs shadow-[0_1px_0_var(--border)]">
                 刷新
               </TableHead>
-              <TableHead className="sticky top-0 z-10 w-11 bg-card px-2 py-1 text-right text-xs shadow-[0_1px_0_var(--border)]">
-                操作
-              </TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {rows.length === 0 ? (
               <TableRow>
                 <TableCell
-                  colSpan={7}
+                  colSpan={6}
                   className="h-16 text-center text-sm text-muted-foreground"
                 >
                   暂无数据
@@ -5847,6 +6022,10 @@ function CompactAuthFileTable({
                 >
                   <TableCell className="px-3 py-1">
                     <div className="flex min-w-0 items-center gap-2">
+                      <Checkbox
+                        checked={selectedIds?.has(row.id) ?? false}
+                        onCheckedChange={() => onToggleSelect?.(row.id)}
+                      />
                       <span
                         className={cn(
                           "h-2 w-2 shrink-0 rounded-full",
@@ -5860,14 +6039,17 @@ function CompactAuthFileTable({
                         )}
                       />
                       <SubscriptionBadge value={row.subscriptionType} />
-                      <HoverCopyTooltip
-                        className="min-w-0 flex-1"
-                        items={accountTooltipItems(row)}
-                      >
-                        <span className="block truncate text-xs font-medium">
+                      <span className="flex min-w-0 flex-1 items-center gap-0.5">
+                        <span className="truncate text-xs font-medium">
                           {row.email ?? "-"}
                         </span>
-                      </HoverCopyTooltip>
+                        <HoverCopyTooltip
+                          className="shrink-0 cursor-help leading-none"
+                          items={accountTooltipItems(row)}
+                        >
+                          <Info className="h-3 w-3 text-muted-foreground/60" />
+                        </HoverCopyTooltip>
+                      </span>
                     </div>
                   </TableCell>
                   <TableCell className="w-24 px-2 py-1">
@@ -5913,133 +6095,6 @@ function CompactAuthFileTable({
                     <span title={formatDate(row.refreshedAt)}>
                       {formatRelativeTime(row.refreshedAt, nowMs)}
                     </span>
-                  </TableCell>
-                  <TableCell className="w-11 whitespace-nowrap px-2 py-1 text-right">
-                    <div className="relative flex justify-end">
-                      <Button
-                        ref={
-                          openActionRowId === row.id ? actionTriggerRef : null
-                        }
-                        size="icon-xs"
-                        variant="ghost"
-                        aria-label={`${row.email ?? row.fileName} 操作`}
-                        aria-expanded={openActionRowId === row.id}
-                        aria-haspopup="menu"
-                        onClick={(event) => {
-                          if (openActionRowId === row.id) {
-                            setOpenActionRowId(null);
-                            return;
-                          }
-                          const rect =
-                            event.currentTarget.getBoundingClientRect();
-                          setActionMenuPosition(
-                            getFloatingMenuPosition(rect, {
-                              menuWidth: 128,
-                              menuHeight: 232,
-                              viewportWidth: window.innerWidth,
-                              viewportHeight: window.innerHeight,
-                            }),
-                          );
-                          setOpenActionRowId(row.id);
-                        }}
-                      >
-                        <MoreHorizontal className="h-4 w-4" />
-                      </Button>
-                      {openActionRowId === row.id &&
-                      typeof document !== "undefined"
-                        ? createPortal(
-                            <div
-                              ref={actionMenuRef}
-                              role="menu"
-                              className="fixed z-[120] min-w-32 rounded-md border bg-popover p-1 text-popover-foreground shadow-md"
-                              style={{
-                                left: actionMenuPosition.left,
-                                top: actionMenuPosition.top,
-                              }}
-                            >
-                              <button
-                                type="button"
-                                role="menuitem"
-                                className="flex w-full items-center rounded px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground"
-                                onClick={() => {
-                                  setOpenActionRowId(null);
-                                  void onRefreshQuota(row.id);
-                                }}
-                              >
-                                刷新配额
-                              </button>
-                              <button
-                                type="button"
-                                role="menuitem"
-                                className="flex w-full items-center rounded px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground"
-                                onClick={() => {
-                                  setOpenActionRowId(null);
-                                  void onToggleDisabled(row.id, !row.disabled);
-                                }}
-                              >
-                                {row.disabled ? "启用" : "停用"}
-                              </button>
-                              <button
-                                type="button"
-                                role="menuitem"
-                                className="flex w-full items-center rounded px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground"
-                                onClick={() => {
-                                  setOpenActionRowId(null);
-                                  onRequestConfigureProxy(row);
-                                }}
-                              >
-                                配置代理
-                              </button>
-                              <button
-                                type="button"
-                                role="menuitem"
-                                disabled={!canMove}
-                                className="flex w-full items-center rounded px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-50"
-                                onClick={() => {
-                                  setOpenActionRowId(null);
-                                  onRequestMove(row);
-                                }}
-                              >
-                                移动到
-                              </button>
-                              <button
-                                type="button"
-                                role="menuitem"
-                                className="flex w-full items-center rounded px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground"
-                                onClick={() => {
-                                  setOpenActionRowId(null);
-                                  onRequestDelete(row);
-                                }}
-                              >
-                                删除
-                              </button>
-                              <button
-                                type="button"
-                                role="menuitem"
-                                className="flex w-full items-center rounded px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground"
-                                onClick={() => {
-                                  setOpenActionRowId(null);
-                                  onRequestPortalCandidate(row);
-                                }}
-                              >
-                                去候补
-                              </button>
-                              <button
-                                type="button"
-                                role="menuitem"
-                                className="flex w-full items-center rounded px-2 py-1.5 text-left text-xs text-rose-700 hover:bg-rose-50 hover:text-rose-800"
-                                onClick={() => {
-                                  setOpenActionRowId(null);
-                                  onRequestPortalException(row);
-                                }}
-                              >
-                                清理
-                              </button>
-                            </div>,
-                            document.body,
-                          )
-                        : null}
-                    </div>
                   </TableCell>
                 </TableRow>
               ))
