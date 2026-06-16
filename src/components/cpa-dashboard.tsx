@@ -3525,7 +3525,6 @@ function AuthFilesSection({
                 type="button"
                 size="xs"
                 variant="outline"
-                disabled={!hasAssignableProxy}
                 onClick={() => {
                   const selectedRows = rows.filter((r) =>
                     selectedAuthFileIds.has(r.id),
@@ -6017,9 +6016,8 @@ function CompactAuthFileTable({
                 <div className="flex items-center gap-2">
                   <Checkbox
                     checked={
-                      selectedIds
-                        ? selectedIds.size === rows.length &&
-                          rows.length > 0
+                      selectedIds && rows.length > 0
+                        ? rows.every((r) => selectedIds.has(r.id))
                         : false
                     }
                     onCheckedChange={() =>
@@ -7595,16 +7593,16 @@ function formatSubscriptionType(value: string) {
   const labels: Record<string, string> = {
     enterprise: "Enterprise",
     team: "Team",
-    pro: "Pro 20x",
-    pro20x: "Pro 20x",
-    "pro-20x": "Pro 20x",
-    pro_20x: "Pro 20x",
-    prolite: "Pro 5x",
-    "pro-lite": "Pro 5x",
-    pro_lite: "Pro 5x",
-    pro5x: "Pro 5x",
-    "pro-5x": "Pro 5x",
-    pro_5x: "Pro 5x",
+    pro: "20X",
+    pro20x: "20X",
+    "pro-20x": "20X",
+    pro_20x: "20X",
+    prolite: "5X",
+    "pro-lite": "5X",
+    pro_lite: "5X",
+    pro5x: "5X",
+    "pro-5x": "5X",
+    pro_5x: "5X",
     plus: "Plus",
     free: "Free",
   };
