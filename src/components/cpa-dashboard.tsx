@@ -2183,6 +2183,8 @@ function AuthFilesSection({
   );
   const [moveTarget, setMoveTarget] = useState<AuthFileQuotaRow | null>(null);
   const [moveTargetInstanceId, setMoveTargetInstanceId] = useState("");
+  const [moveBatchIds, setMoveBatchIds] = useState<number[] | null>(null);
+  const [moveBatchCpaInstanceId, setMoveBatchCpaInstanceId] = useState<number | null>(null);
   const [proxyTarget, setProxyTarget] = useState<AuthFileQuotaRow | null>(null);
   const [proxyTargetUrl, setProxyTargetUrl] = useState("");
   const [openLoginMenuInstanceId, setOpenLoginMenuInstanceId] = useState<
@@ -2309,12 +2311,26 @@ function AuthFilesSection({
     return () => mediaQuery.removeEventListener("change", update);
   }, []);
 
-  function openMoveDialog(row: AuthFileQuotaRow) {
-    const firstTarget = enabledInstances.find(
-      (instance) => instance.id !== row.cpaInstanceId,
-    );
-    setMoveTarget(row);
-    setMoveTargetInstanceId(firstTarget ? String(firstTarget.id) : "");
+  function openMoveDialog(
+    rowOrBatch: AuthFileQuotaRow | { ids: number[]; cpaInstanceId: number },
+  ) {
+    if ("ids" in rowOrBatch) {
+      const firstTarget = enabledInstances.find(
+        (instance) => instance.id !== rowOrBatch.cpaInstanceId,
+      );
+      setMoveTarget(null);
+      setMoveBatchIds(rowOrBatch.ids);
+      setMoveBatchCpaInstanceId(rowOrBatch.cpaInstanceId);
+      setMoveTargetInstanceId(firstTarget ? String(firstTarget.id) : "");
+    } else {
+      const firstTarget = enabledInstances.find(
+        (instance) => instance.id !== rowOrBatch.cpaInstanceId,
+      );
+      setMoveTarget(rowOrBatch);
+      setMoveBatchIds(null);
+      setMoveBatchCpaInstanceId(null);
+      setMoveTargetInstanceId(firstTarget ? String(firstTarget.id) : "");
+    }
   }
 
   function openProxyDialog(row: AuthFileQuotaRow) {
@@ -2438,11 +2454,20 @@ function AuthFilesSection({
     );
   }
 
-  const moveOptions = moveTarget
-    ? enabledInstances.filter(
-        (instance) => instance.id !== moveTarget.cpaInstanceId,
-      )
-    : [];
+  const moveOptions = (
+    moveTarget
+      ? [moveTarget.cpaInstanceId]
+      : moveBatchCpaInstanceId
+        ? [moveBatchCpaInstanceId]
+        : []
+  )
+    .flatMap((cpaInstanceId) =>
+      enabledInstances.filter((instance) => instance.id !== cpaInstanceId),
+    )
+    .filter(
+      (instance, index, list) =>
+        list.findIndex((item) => item.id === instance.id) === index,
+    );
   const proxyOptions = proxyTarget
     ? proxiesForCpa(proxyTarget.cpaInstanceId)
     : [];
@@ -3518,11 +3543,11 @@ function AuthFilesSection({
                 variant="outline"
                 disabled={enabledInstances.length <= 1}
                 onClick={() => {
-                  const selectedRows = rows.filter((r) =>
-                    selectedAuthFileIds.has(r.id),
-                  );
-                  if (selectedRows.length > 0) {
-                    openMoveDialog(selectedRows[0]);
+                  if (selectedInGroupIds.length > 0) {
+                    openMoveDialog({
+                      ids: selectedInGroupIds,
+                      cpaInstanceId: group.instance.id,
+                    });
                   }
                 }}
               >
@@ -3656,15 +3681,18 @@ function AuthFilesSection({
       </Dialog>
 
       <Dialog
-        open={moveTarget !== null}
-        onOpenChange={(open) => !open && setMoveTarget(null)}
+        open={moveTarget !== null || moveBatchIds !== null}
+        onOpenChange={(open) =>
+          !open && (setMoveTarget(null), setMoveBatchIds(null), setMoveBatchCpaInstanceId(null))
+        }
       >
         <DialogContent>
           <DialogHeader>
             <DialogTitle>移动账号</DialogTitle>
             <DialogDescription>
-              选择目标 CPA。确认后会先上传认证文件到目标 CPA，再从当前 CPA
-              删除。
+              {moveBatchIds && moveBatchIds.length > 0
+                ? `移动 ${moveBatchIds.length} 个选中账号到目标 CPA。确认后会先上传认证文件到目标 CPA，再从当前 CPA 删除。`
+                : "选择目标 CPA。确认后会先上传认证文件到目标 CPA，再从当前 CPA 删除。"}
             </DialogDescription>
           </DialogHeader>
           <div className="grid gap-2">
@@ -3691,21 +3719,38 @@ function AuthFilesSection({
             <Button
               type="button"
               variant="outline"
-              onClick={() => setMoveTarget(null)}
+              onClick={() => {
+                setMoveTarget(null);
+                setMoveBatchIds(null);
+                setMoveBatchCpaInstanceId(null);
+              }}
             >
               取消
             </Button>
             <Button
               type="button"
-              disabled={!moveTarget || !moveTargetInstanceId}
+              disabled={
+                (moveTarget === null && moveBatchIds === null) ||
+                !moveTargetInstanceId
+              }
               onClick={() => {
-                if (!moveTarget || !moveTargetInstanceId) {
+                if (!moveTargetInstanceId) {
                   return;
                 }
-                const authFileId = moveTarget.id;
                 const targetId = Number(moveTargetInstanceId);
-                setMoveTarget(null);
-                void onMoveAuthFile(authFileId, targetId);
+                if (moveBatchIds && moveBatchIds.length > 0) {
+                  const batchIds = moveBatchIds;
+                  const batchCpaId = moveBatchCpaInstanceId;
+                  setMoveBatchIds(null);
+                  setMoveBatchCpaInstanceId(null);
+                  if (batchCpaId) {
+                    void onMoveAuthFiles(batchCpaId, batchIds, targetId);
+                  }
+                } else if (moveTarget) {
+                  const authFileId = moveTarget.id;
+                  setMoveTarget(null);
+                  void onMoveAuthFile(authFileId, targetId);
+                }
               }}
             >
               确定
