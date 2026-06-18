@@ -182,6 +182,29 @@ describe("migrate", () => {
     );
   });
 
+  it("creates account tag storage", async () => {
+    const { migrate } = await import("./migrate");
+    const { getSqlite } = await import("./client");
+
+    migrate();
+    const sqlite = getSqlite();
+
+    const columns = sqlite
+      .prepare("PRAGMA table_info(account_tags)")
+      .all() as Array<{ name: string }>;
+    expect(columns.map((column) => column.name)).toEqual([
+      "account_key",
+      "tag",
+      "created_at",
+      "updated_at",
+    ]);
+
+    const indexes = sqlite
+      .prepare("PRAGMA index_list(account_tags)")
+      .all() as Array<{ name: string; origin: string }>;
+    expect(indexes.some((index) => index.origin === "pk")).toBe(true);
+  });
+
   it("adds sync phase storage for active CPA sync runs", async () => {
     const { migrate } = await import("./migrate");
     const { getSqlite } = await import("./client");

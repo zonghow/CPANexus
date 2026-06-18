@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { sortAccountRows } from "./account-sort";
+import { sortAccountRows, type AccountSortRow } from "./account-sort";
 
 describe("sortAccountRows", () => {
   it("sorts accounts by subscription tier before account name", () => {
@@ -35,7 +35,7 @@ describe("sortAccountRows", () => {
   });
 
   it("always pushes limited, disabled, and exception accounts to the end", () => {
-    const rows = [
+    const rows: AccountSortRow[] = [
       { email: "z-normal-free@example.com", subscriptionType: "free", quotaStatus: "available" },
       { email: "a-limited-pro@example.com", subscriptionType: "pro", quotaStatus: "limited" },
       { email: "a-normal-plus@example.com", subscriptionType: "plus", quotaStatus: "available" },

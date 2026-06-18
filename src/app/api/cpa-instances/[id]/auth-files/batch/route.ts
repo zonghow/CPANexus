@@ -1,7 +1,8 @@
 import { and, desc, eq, inArray } from "drizzle-orm";
 
 import { db } from "@/db/client";
-import { authFiles, cpaInstances, proxies, proxyCpaInstances, quotaSnapshots } from "@/db/schema";
+import { accountTags, authFiles, cpaInstances, proxies, proxyCpaInstances, quotaSnapshots } from "@/db/schema";
+import { accountTagKey, normalizeAccountTag } from "@/lib/account-tags";
 import {
   badRequest,
   initRequestDb,
@@ -37,6 +38,7 @@ type BatchAction =
   | "autoAssignProxy"
   | "download"
   | "move"
+  | "tag"
   | "portalExceptions"
   | "portalCandidates";
 type BatchTarget = "selected" | "free";
@@ -62,6 +64,7 @@ export async function POST(
       authFileIds?: number[];
       target?: BatchTarget;
       targetCpaInstanceId?: number;
+      tag?: string;
     }>(request);
     if (
       body.action !== "delete" &&
@@ -69,10 +72,11 @@ export async function POST(
       body.action !== "autoAssignProxy" &&
       body.action !== "download" &&
       body.action !== "move" &&
+      body.action !== "tag" &&
       body.action !== "portalExceptions" &&
       body.action !== "portalCandidates"
     ) {
-      return badRequest("action must be delete, disable, autoAssignProxy, download, move, portalExceptions, or portalCandidates");
+      return badRequest("action must be delete, disable, autoAssignProxy, download, move, tag, portalExceptions, or portalCandidates");
     }
     if (body.target !== undefined && body.target !== "selected" && body.target !== "free") {
       return badRequest("target must be selected or free");
@@ -146,6 +150,26 @@ export async function POST(
         action: body.action,
         processed: rows.length,
         sync: await syncAffectedCpaInstances([cpaInstanceId, targetInstance.id]),
+      });
+    }
+
+    if (body.action === "tag") {
+      const rows = loadSelectedAuthFiles(cpaInstanceId, body.authFileIds);
+      if (rows instanceof Response) {
+        return rows;
+      }
+
+      const tag = normalizeAccountTag(body.tag);
+      if (!tag) {
+        return badRequest("tag is required");
+      }
+
+      upsertAccountTags(rows, tag);
+
+      return ok({
+        status: "ok",
+        action: body.action,
+        processed: rows.length,
       });
     }
 
@@ -241,6 +265,31 @@ function loadSelectedAuthFiles(cpaInstanceId: number, authFileIds: number[] | un
   }
 
   return rows;
+}
+
+function upsertAccountTags(
+  rows: Array<typeof authFiles.$inferSelect>,
+  tag: string,
+) {
+  const taggedAt = new Date().toISOString();
+
+  for (const authFile of rows) {
+    db.insert(accountTags)
+      .values({
+        accountKey: accountTagKey(authFile),
+        tag,
+        createdAt: taggedAt,
+        updatedAt: taggedAt,
+      })
+      .onConflictDoUpdate({
+        target: accountTags.accountKey,
+        set: {
+          tag,
+          updatedAt: taggedAt,
+        },
+      })
+      .run();
+  }
 }
 
 function loadFreeAuthFiles(cpaInstanceId: number, includeDisabled: boolean) {

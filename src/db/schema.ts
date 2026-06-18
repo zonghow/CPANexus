@@ -54,6 +54,13 @@ export const authFiles = sqliteTable(
   ],
 );
 
+export const accountTags = sqliteTable("account_tags", {
+  accountKey: text("account_key").primaryKey(),
+  tag: text("tag").notNull(),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+
 export const exceptionAuthFiles = sqliteTable(
   "exception_auth_files",
   {

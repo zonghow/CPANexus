@@ -69,6 +69,7 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { DataBoardSection } from "@/components/data-board-section";
 import { MessagePushSection } from "@/components/message-push-section";
+import { accountTagMaxLength } from "@/lib/account-tags";
 import {
   resolveAccountQuotaStatus,
   type AccountQuotaState,
@@ -119,6 +120,7 @@ type AuthFile = {
   statusMessage: string | null;
   disabled: boolean;
   available: boolean;
+  accountTag: string | null;
   proxyUrl: string | null;
   rawJson: string | null;
   createdAt: string;
@@ -1145,6 +1147,26 @@ export function CpaDashboard({
     }
   }
 
+  async function tagAuthFiles(
+    cpaInstanceId: number,
+    authFileIds: number[],
+    tag: string,
+  ) {
+    if (authFileIds.length === 0) {
+      throw new Error("请先选择账号");
+    }
+
+    const result = await mutate<{ processed: number; action: "tag" }>(
+      `/api/cpa-instances/${cpaInstanceId}/auth-files/batch`,
+      {
+        method: "POST",
+        body: JSON.stringify({ action: "tag", authFileIds, tag }),
+      },
+    );
+    toast.success(`已给 ${result.processed} 个账号打 Tag`);
+    await loadAll();
+  }
+
   async function refreshAuthFileQuota(id: number) {
     const sourceCpaInstanceId = findAuthFileCpaInstanceId(id);
     try {
@@ -1733,6 +1755,7 @@ export function CpaDashboard({
                 onMoveAuthFile={moveAuthFile}
                 onToggleAuthFileDisabled={toggleAuthFileDisabled}
                 onConfigureAuthFileProxy={configureAuthFileProxy}
+                onTagAuthFiles={tagAuthFiles}
                 onRefreshAuthFileQuota={refreshAuthFileQuota}
                 onRtLoginAccount={rtLoginCpaAccount}
                 onUploadRtLoginAccounts={uploadRtLoginCpaAccounts}
@@ -2098,6 +2121,7 @@ function AuthFilesSection({
   onMoveAuthFile,
   onToggleAuthFileDisabled,
   onConfigureAuthFileProxy,
+  onTagAuthFiles,
   onRefreshAuthFileQuota,
   onRtLoginAccount,
   onUploadRtLoginAccounts,
@@ -2125,6 +2149,11 @@ function AuthFilesSection({
   onConfigureAuthFileProxy: (
     id: number,
     proxyUrl: string | null,
+  ) => Promise<void>;
+  onTagAuthFiles: (
+    cpaInstanceId: number,
+    authFileIds: number[],
+    tag: string,
   ) => Promise<void>;
   onRefreshAuthFileQuota: (id: number) => Promise<void>;
   onRtLoginAccount: (
@@ -2187,6 +2216,12 @@ function AuthFilesSection({
   const [moveBatchCpaInstanceId, setMoveBatchCpaInstanceId] = useState<number | null>(null);
   const [proxyTarget, setProxyTarget] = useState<AuthFileQuotaRow | null>(null);
   const [proxyTargetUrl, setProxyTargetUrl] = useState("");
+  const [tagTarget, setTagTarget] = useState<{
+    instance: CpaInstance;
+    authFileIds: number[];
+    value: string;
+    submitting: boolean;
+  } | null>(null);
   const [openLoginMenuInstanceId, setOpenLoginMenuInstanceId] = useState<
     number | null
   >(null);
@@ -2341,6 +2376,36 @@ function AuthFilesSection({
         : "";
     setProxyTarget(row);
     setProxyTargetUrl(currentProxyUrl);
+  }
+
+  async function submitTagDialog() {
+    if (!tagTarget) {
+      return;
+    }
+
+    const tag = tagTarget.value.trim();
+    if (!tag) {
+      toast.info("请输入 Tag 内容");
+      return;
+    }
+
+    setTagTarget((current) =>
+      current ? { ...current, submitting: true } : current,
+    );
+    try {
+      await onTagAuthFiles(tagTarget.instance.id, tagTarget.authFileIds, tag);
+      setSelectedAuthFileIds((current) => {
+        const next = new Set(current);
+        tagTarget.authFileIds.forEach((id) => next.delete(id));
+        return next;
+      });
+      setTagTarget(null);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error));
+      setTagTarget((current) =>
+        current ? { ...current, submitting: false } : current,
+      );
+    }
   }
 
   function toggleExchangeMenu(
@@ -3540,6 +3605,23 @@ function AuthFilesSection({
                 type="button"
                 size="xs"
                 variant="outline"
+                onClick={() => {
+                  if (selectedInGroupIds.length > 0) {
+                    setTagTarget({
+                      instance: group.instance,
+                      authFileIds: selectedInGroupIds,
+                      value: "",
+                      submitting: false,
+                    });
+                  }
+                }}
+              >
+                打Tag
+              </Button>
+              <Button
+                type="button"
+                size="xs"
+                variant="outline"
                 disabled={enabledInstances.length <= 1}
                 onClick={() => {
                   if (selectedInGroupIds.length > 0) {
@@ -3812,6 +3894,69 @@ function AuthFilesSection({
                 void onConfigureAuthFileProxy(authFileId, nextProxyUrl);
               }}
             >
+              保存
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={tagTarget !== null}
+        onOpenChange={(open) => {
+          if (!open && !tagTarget?.submitting) {
+            setTagTarget(null);
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>打Tag</DialogTitle>
+            <DialogDescription>
+              给 {tagTarget?.authFileIds.length ?? 0} 个选中账号设置同一个
+              Tag。再次打 Tag 会覆盖原有内容。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-2">
+            <Label htmlFor="auth-file-tag">Tag 内容</Label>
+            <Input
+              id="auth-file-tag"
+              value={tagTarget?.value ?? ""}
+              maxLength={accountTagMaxLength}
+              disabled={tagTarget?.submitting}
+              autoFocus
+              onChange={(event) =>
+                setTagTarget((current) =>
+                  current ? { ...current, value: event.target.value } : current,
+                )
+              }
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  void submitTagDialog();
+                }
+              }}
+            />
+            <div className="text-xs text-muted-foreground">
+              最多 {accountTagMaxLength} 个字符。
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={tagTarget?.submitting}
+              onClick={() => setTagTarget(null)}
+            >
+              取消
+            </Button>
+            <Button
+              type="button"
+              disabled={!tagTarget || tagTarget.submitting || !tagTarget.value.trim()}
+              onClick={() => void submitTagDialog()}
+            >
+              {tagTarget?.submitting ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : null}
               保存
             </Button>
           </DialogFooter>
@@ -5969,6 +6114,7 @@ type AuthFileQuotaRow = {
   cpaInstanceId: number;
   fileName: string;
   email: string | null;
+  accountTag: string | null;
   proxyUrl: string | null;
   proxyName: string | null;
   disabled: boolean;
@@ -6082,6 +6228,14 @@ function CompactAuthFileTable({
                         )}
                       />
                       <SubscriptionBadge value={row.subscriptionType} />
+                      {row.accountTag ? (
+                        <SubscriptionBadge
+                          value={row.accountTag}
+                          formatValue={false}
+                          className="max-w-20 truncate normal-case"
+                          title={row.accountTag}
+                        />
+                      ) : null}
                       <span className="flex min-w-0 flex-1 items-center gap-0.5">
                         <span className="truncate text-xs font-medium">
                           {row.email ?? "-"}
@@ -6494,6 +6648,7 @@ function mergeAuthFilesWithQuotas(
       cpaInstanceId: file.cpaInstanceId,
       fileName: file.fileName,
       email: quota?.email ?? file.email,
+      accountTag: file.accountTag,
       proxyUrl,
       proxyName: proxyUrl ? (proxyNameByUrl.get(proxyUrl) ?? null) : null,
       disabled,
@@ -6626,7 +6781,17 @@ function quotaRemainingTone(remaining: number | null) {
   };
 }
 
-function SubscriptionBadge({ value }: { value: string | null }) {
+function SubscriptionBadge({
+  value,
+  formatValue = true,
+  className,
+  title,
+}: {
+  value: string | null;
+  formatValue?: boolean;
+  className?: string;
+  title?: string;
+}) {
   if (!value) {
     return <span className="text-muted-foreground">-</span>;
   }
@@ -6634,12 +6799,15 @@ function SubscriptionBadge({ value }: { value: string | null }) {
   return (
     <Badge
       variant="outline"
+      title={title ?? value}
       className={cn(
-        "h-4 px-1.5 py-0 text-[10px] leading-none uppercase",
+        "h-4 px-1.5 py-0 text-[10px] leading-none",
+        formatValue && "uppercase",
         subscriptionBadgeClass(value),
+        className,
       )}
     >
-      {formatSubscriptionType(value)}
+      {formatValue ? formatSubscriptionType(value) : value}
     </Badge>
   );
 }

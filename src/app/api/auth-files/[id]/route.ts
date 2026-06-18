@@ -1,7 +1,8 @@
 import { and, eq } from "drizzle-orm";
 
 import { db } from "@/db/client";
-import { authFiles, cpaInstances, proxies, proxyCpaInstances, quotaSnapshots } from "@/db/schema";
+import { accountTags, authFiles, cpaInstances, proxies, proxyCpaInstances, quotaSnapshots } from "@/db/schema";
+import { accountTagKey, normalizeAccountTag } from "@/lib/account-tags";
 import {
   badRequest,
   initRequestDb,
@@ -152,7 +153,34 @@ export async function PATCH(
       targetCpaInstanceId?: number;
       disabled?: boolean;
       proxyUrl?: string | null;
+      tag?: string;
     }>(request);
+
+    if (Object.hasOwn(body, "tag")) {
+      const tag = normalizeAccountTag(body.tag);
+      if (!tag) {
+        return badRequest("tag is required");
+      }
+
+      const taggedAt = new Date().toISOString();
+      db.insert(accountTags)
+        .values({
+          accountKey: accountTagKey(authFile),
+          tag,
+          createdAt: taggedAt,
+          updatedAt: taggedAt,
+        })
+        .onConflictDoUpdate({
+          target: accountTags.accountKey,
+          set: {
+            tag,
+            updatedAt: taggedAt,
+          },
+        })
+        .run();
+
+      return ok({ status: "ok", tag });
+    }
 
     if (Object.hasOwn(body, "proxyUrl")) {
       const sourceInstance = db

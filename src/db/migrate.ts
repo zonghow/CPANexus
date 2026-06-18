@@ -40,6 +40,13 @@ export function migrate() {
     CREATE UNIQUE INDEX IF NOT EXISTS auth_files_instance_file_unique
       ON auth_files(cpa_instance_id, file_name);
 
+    CREATE TABLE IF NOT EXISTS account_tags (
+      account_key TEXT PRIMARY KEY,
+      tag TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
     CREATE TABLE IF NOT EXISTS exception_auth_files (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       source_cpa_instance_id INTEGER,

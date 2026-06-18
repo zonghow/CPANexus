@@ -281,6 +281,46 @@ describe("/api/cpa-instances/[id]/auth-files/batch", () => {
     ]);
   });
 
+  it("tags selected auth files locally without calling CPA sync", async () => {
+    const sqlite = await setupSqlite();
+    const cpaInstanceId = insertInstance(sqlite);
+    const firstId = insertAuthFile(sqlite, cpaInstanceId, "codex-first@example.com-auto.json");
+    const secondId = insertAuthFile(sqlite, cpaInstanceId, "codex-second@example.com-auto.json");
+
+    const cpaClient = await import("@/lib/cpa-client");
+    const jobs = await import("@/lib/jobs");
+    const route = await import("./route");
+
+    const response = await route.POST(
+      new Request("http://localhost/api/cpa-instances/1/auth-files/batch", {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({
+          action: "tag",
+          authFileIds: [firstId, secondId],
+          tag: "  high priority  ",
+        }),
+      }),
+      { params: Promise.resolve({ id: String(cpaInstanceId) }) },
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      status: "ok",
+      processed: 2,
+      action: "tag",
+    });
+    expect(cpaClient.patchRemoteAuthFileFields).not.toHaveBeenCalled();
+    expect(cpaClient.setRemoteAuthFileDisabled).not.toHaveBeenCalled();
+    expect(jobs.syncCpaInstanceById).not.toHaveBeenCalled();
+    expect(
+      sqlite.prepare("SELECT account_key, tag FROM account_tags ORDER BY account_key").all(),
+    ).toEqual([
+      { account_key: "email:first@example.com", tag: "high priority" },
+      { account_key: "email:second@example.com", tag: "high priority" },
+    ]);
+  });
+
   it("deletes only free auth files when the free target is requested", async () => {
     const sqlite = await setupSqlite();
     const cpaInstanceId = insertInstance(sqlite);
@@ -551,6 +591,9 @@ describe("/api/cpa-instances/[id]/auth-files/batch", () => {
     const targetId = insertInstance(sqlite, "target", "https://target.example.com");
     const firstId = insertAuthFile(sqlite, sourceId, "codex-first@example.com-auto.json");
     const secondId = insertAuthFile(sqlite, sourceId, "codex-second@example.com-auto.json");
+    sqlite
+      .prepare("INSERT INTO account_tags (account_key, tag) VALUES ('email:first@example.com', 'vip')")
+      .run();
     insertQuotaSnapshot(sqlite, sourceId, "codex-first@example.com-auto.json");
     insertQuotaSnapshot(sqlite, sourceId, "codex-second@example.com-auto.json");
 
@@ -618,6 +661,9 @@ describe("/api/cpa-instances/[id]/auth-files/batch", () => {
       },
     ]);
     expect(sqlite.prepare("SELECT COUNT(*) AS count FROM quota_snapshots").get()).toMatchObject({ count: 0 });
+    expect(
+      sqlite.prepare("SELECT account_key, tag FROM account_tags").get(),
+    ).toEqual({ account_key: "email:first@example.com", tag: "vip" });
   });
 });
 
