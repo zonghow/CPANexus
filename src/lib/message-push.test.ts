@@ -34,8 +34,8 @@ describe("message push evaluation", () => {
   it("sends a remaining-threshold notification once until the CPA recovers", async () => {
     const sqlite = await setupSqlite();
     const cpaInstanceId = insertInstance(sqlite, "target");
-    insertAuthFile(sqlite, cpaInstanceId, "a@example.com", true);
-    insertAuthFile(sqlite, cpaInstanceId, "b@example.com", true);
+    insertAuthFile(sqlite, cpaInstanceId, "account-0@example.com", true);
+    insertAuthFile(sqlite, cpaInstanceId, "account-1@example.com", true);
     replaceQuotaSnapshots(sqlite, cpaInstanceId, [80, 90]);
     insertPolicy(sqlite, {
       name: "5h low",
@@ -74,6 +74,65 @@ describe("message push evaluation", () => {
     replaceQuotaSnapshots(sqlite, cpaInstanceId, [90, 90]);
     await evaluateMessagePushPoliciesForCpa(cpaInstanceId);
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("uses the auth-management remaining algorithm for threshold notifications", async () => {
+    const sqlite = await setupSqlite();
+    const cpaInstanceId = insertInstance(sqlite, "Weighted CPA");
+    insertAuthFile(sqlite, cpaInstanceId, "plus@example.com", true);
+    insertAuthFile(sqlite, cpaInstanceId, "pro@example.com", true);
+    insertAuthFile(sqlite, cpaInstanceId, "free@example.com", true);
+    insertAuthFile(sqlite, cpaInstanceId, "dead@example.com", false, "refresh failed");
+    insertQuotaSnapshot(sqlite, {
+      cpaInstanceId,
+      authFileName: "plus@example.com.json",
+      email: "plus@example.com",
+      usage5hPercent: 90,
+      rawJson: JSON.stringify({ plan_type: "plus" }),
+    });
+    insertQuotaSnapshot(sqlite, {
+      cpaInstanceId,
+      authFileName: "pro@example.com.json",
+      email: "pro@example.com",
+      usage5hPercent: 50,
+      rawJson: JSON.stringify({ plan_type: "pro" }),
+    });
+    insertQuotaSnapshot(sqlite, {
+      cpaInstanceId,
+      authFileName: "free@example.com.json",
+      email: "free@example.com",
+      usage5hPercent: 0,
+      rawJson: JSON.stringify({ plan_type: "free" }),
+    });
+    insertQuotaSnapshot(sqlite, {
+      cpaInstanceId,
+      authFileName: "dead@example.com.json",
+      email: "dead@example.com",
+      available: false,
+      exception: "refresh failed",
+      usage5hPercent: 0,
+      rawJson: JSON.stringify({ plan_type: "plus" }),
+    });
+    insertPolicy(sqlite, {
+      name: "weighted 5h low",
+      triggerType: "remaining_5h_below",
+      thresholdPercent: 50,
+      bodyTemplate: "{{cpaName}} {{value}} {{threshold}}",
+    });
+
+    const { evaluateMessagePushPoliciesForCpa } = await import("./message-push");
+
+    await evaluateMessagePushPoliciesForCpa(cpaInstanceId);
+
+    const fetchMock = vi.mocked(fetch);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
+      body: "Weighted CPA 48 50",
+    });
+    expect(activeState(sqlite)).toEqual({
+      active: 1,
+      last_value: 48,
+    });
   });
 
   it("sends account-exception notifications only for CPAs in a custom scope", async () => {
@@ -349,9 +408,11 @@ function insertQuotaSnapshot(
     cpaInstanceId: number;
     authFileName: string;
     email: string;
-    available: boolean;
-    exception: string | null;
-    rawJson: string | null;
+    usage5hPercent?: number;
+    usageWeekPercent?: number;
+    available?: boolean;
+    exception?: string | null;
+    rawJson?: string | null;
   },
 ) {
   sqlite
@@ -366,15 +427,17 @@ function insertQuotaSnapshot(
         exception,
         raw_json
       )
-      VALUES (?, ?, ?, 100, 31, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `)
     .run(
       values.cpaInstanceId,
       values.authFileName,
       values.email,
-      values.available ? 1 : 0,
-      values.exception,
-      values.rawJson,
+      values.usage5hPercent ?? 100,
+      values.usageWeekPercent ?? 31,
+      (values.available ?? true) ? 1 : 0,
+      values.exception ?? null,
+      values.rawJson ?? null,
     );
 }
 

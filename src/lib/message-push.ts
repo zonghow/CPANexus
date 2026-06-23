@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 
 import { db } from "@/db/client";
 import {
@@ -13,8 +13,9 @@ import {
   type MessagePushPolicy,
 } from "@/db/schema";
 
-import { averageRemainingPercent } from "./quota-summary";
+import { averageAccountRemainingPercent } from "./quota-summary";
 import { resolveAccountQuotaStatus } from "./account-quota-status";
+import { extractSubscriptionType } from "./subscription";
 
 export const messagePushTriggerTypes = [
   "account_exception",
@@ -40,13 +41,7 @@ type CpaSnapshot = {
   remainingWeekPercent: number | null;
 };
 
-type QuotaSnapshotForStatus = {
-  authFileName: string | null;
-  email: string | null;
-  available: boolean;
-  exception: string | null;
-  rawJson: string | null;
-};
+type QuotaSnapshotForStatus = typeof quotaSnapshots.$inferSelect;
 
 type TriggerEvaluation = {
   active: boolean;
@@ -206,10 +201,16 @@ function buildCpaSnapshot(cpaInstanceId: number, cpaName: string): CpaSnapshot {
     .select()
     .from(quotaSnapshots)
     .where(eq(quotaSnapshots.cpaInstanceId, cpaInstanceId))
+    .orderBy(desc(quotaSnapshots.capturedAt))
+    .limit(300)
     .all();
+  const latestQuotas = latestQuotaSnapshotsByAccount(quotas);
   const activeAuthFiles = files.filter((file) => !file.disabled);
   const exceptionFiles = activeAuthFiles.filter((file) =>
-    isExceptionAuthFile(file, quotas),
+    isExceptionAuthFile(file, latestQuotas),
+  );
+  const accountRows = activeAuthFiles.map((file) =>
+    accountRemainingPercentRow(file, latestQuotas),
   );
 
   return {
@@ -220,11 +221,13 @@ function buildCpaSnapshot(cpaInstanceId: number, cpaName: string): CpaSnapshot {
       .slice(0, 5)
       .map((file) => file.email ?? file.fileName)
       .join("、"),
-    remaining5hPercent: averageRemainingPercent(
-      quotas.map((snapshot) => snapshot.usage5hPercent),
+    remaining5hPercent: averageAccountRemainingPercent(
+      accountRows,
+      "usage5hPercent",
     ),
-    remainingWeekPercent: averageRemainingPercent(
-      quotas.map((snapshot) => snapshot.usageWeekPercent),
+    remainingWeekPercent: averageAccountRemainingPercent(
+      accountRows,
+      "usageWeekPercent",
     ),
   };
 }
@@ -413,14 +416,44 @@ function upsertActiveState(
 
 function isExceptionAuthFile(file: AuthFile, quotas: QuotaSnapshotForStatus[]) {
   const quota = matchingQuotaSnapshot(file, quotas);
-  const status = resolveAccountQuotaStatus({
-    disabled: file.disabled,
-    available: quota?.available ?? file.available,
-    exception: quota?.exception ?? file.statusMessage,
-    rawJson: quota?.rawJson ?? null,
-  });
+  const status = resolveAuthFileQuotaStatus(file, quota);
 
   return status.state === "exception";
+}
+
+function accountRemainingPercentRow(
+  file: AuthFile,
+  quotas: QuotaSnapshotForStatus[],
+) {
+  const quota = matchingQuotaSnapshot(file, quotas);
+  const quotaStatus = resolveAuthFileQuotaStatus(file, quota);
+
+  return {
+    subscriptionType: extractSubscriptionType(quota?.rawJson ?? null),
+    quotaStatus: quotaStatus.state,
+    usage5hPercent: quota?.usage5hPercent ?? null,
+    usageWeekPercent: quota?.usageWeekPercent ?? null,
+  };
+}
+
+function resolveAuthFileQuotaStatus(
+  file: AuthFile,
+  quota: QuotaSnapshotForStatus | null,
+) {
+  const disabled = Boolean(file.disabled);
+  const available = disabled ? false : (quota?.available ?? file.available);
+  const exception = disabled
+    ? null
+    : quota
+      ? quota.exception
+      : (file.statusMessage ?? (available ? null : (file.status ?? "异常")));
+
+  return resolveAccountQuotaStatus({
+    disabled,
+    available,
+    exception,
+    rawJson: disabled ? null : (quota?.rawJson ?? null),
+  });
 }
 
 function matchingQuotaSnapshot(file: AuthFile, quotas: QuotaSnapshotForStatus[]) {
@@ -434,6 +467,26 @@ function matchingQuotaSnapshot(file: AuthFile, quotas: QuotaSnapshotForStatus[])
     }
     return false;
   }) ?? null;
+}
+
+function latestQuotaSnapshotsByAccount<
+  T extends { email: string | null; authFileName: string | null },
+>(
+  rows: T[],
+) {
+  const seen = new Set<string>();
+  const result: T[] = [];
+
+  for (const row of rows) {
+    const key = row.email || row.authFileName;
+    if (!key || seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    result.push(row);
+  }
+
+  return result;
 }
 
 function parseHeadersJson(value: string | null) {
