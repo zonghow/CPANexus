@@ -30,6 +30,7 @@ import {
 } from "lucide-react";
 import {
   type ChangeEvent,
+  type CSSProperties,
   type DragEvent,
   type FormEvent,
   type MouseEvent,
@@ -69,6 +70,10 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { DataBoardSection } from "@/components/data-board-section";
 import { MessagePushSection } from "@/components/message-push-section";
+import { ThemeToggle } from "@/components/theme-toggle";
+import { SidebarModeMenu } from "@/components/sidebar-mode-menu";
+import { useSidebar } from "@/components/use-sidebar";
+import { SIDEBAR_COLLAPSED_WIDTH } from "@/lib/sidebar";
 import { accountTagMaxLength } from "@/lib/account-tags";
 import {
   resolveAccountQuotaStatus,
@@ -459,6 +464,81 @@ export function CpaDashboard({
 
   const activeLabel =
     navItems.find((item) => item.id === activeSection)?.label ?? "CPA Nexus";
+
+  const sidebar = useSidebar();
+  const sidebarCollapsed = sidebar.mode === "collapsed";
+  const sidebarColumns =
+    sidebar.mode === "collapsed"
+      ? `${SIDEBAR_COLLAPSED_WIDTH}px 1fr`
+      : "var(--sidebar-w) 1fr";
+
+  const renderSidebarResizeHandle = () => (
+    <div
+      role="separator"
+      aria-orientation="vertical"
+      title="拖动调整宽度"
+      onMouseDown={sidebar.startResize}
+      className="group/resize absolute right-0 top-0 hidden h-full w-1.5 cursor-col-resize lg:block"
+    >
+      <span
+        className={cn(
+          "absolute right-0 top-0 h-full w-px transition-colors",
+          sidebar.resizing
+            ? "w-0.5 bg-primary"
+            : "bg-transparent group-hover/resize:w-0.5 group-hover/resize:bg-primary",
+        )}
+      />
+    </div>
+  );
+
+  const renderSidebarInner = (collapsed: boolean) => (
+    <div className="flex h-full flex-col">
+      <div className="flex min-h-14 items-center gap-2 border-b px-2 py-2.5">
+        <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-primary text-primary-foreground">
+          <Network className="h-3.5 w-3.5" />
+        </div>
+        <div
+          className={cn(
+            "truncate text-[13px] font-semibold",
+            collapsed && "lg:hidden",
+          )}
+        >
+          CPA Nexus
+        </div>
+        <div
+          className={cn(
+            "ml-auto shrink-0",
+            collapsed && "lg:ml-0 lg:w-full lg:justify-items-center",
+          )}
+        >
+          <SidebarModeMenu mode={sidebar.mode} onSelect={sidebar.setMode} />
+        </div>
+      </div>
+      <nav className="flex gap-1 overflow-x-auto p-1 lg:flex-col lg:overflow-visible">
+        {navItems.map((item) => {
+          const Icon = item.icon;
+          return (
+            <a
+              key={item.id}
+              href={item.href}
+              title={collapsed ? item.label : undefined}
+              onClick={(event) => navigateSection(event, item.id, item.href)}
+              className={cn(
+                "flex h-8 min-w-max items-center gap-1.5 rounded-md px-1.5 text-[12.5px] transition-colors",
+                collapsed && "lg:min-w-0 lg:justify-center lg:px-0",
+                activeSection === item.id
+                  ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                  : "text-muted-foreground hover:bg-sidebar-accent/70 hover:text-foreground",
+              )}
+            >
+              <Icon className="h-3.5 w-3.5 shrink-0" />
+              <span className={cn(collapsed && "lg:hidden")}>{item.label}</span>
+            </a>
+          );
+        })}
+      </nav>
+    </div>
+  );
 
   useEffect(() => {
     function handlePopState() {
@@ -1651,41 +1731,55 @@ export function CpaDashboard({
 
   return (
     <div className="min-h-screen bg-[color-mix(in_oklch,var(--background),var(--muted)_35%)] text-foreground">
-      <div className="grid min-h-screen grid-cols-1 lg:grid-cols-[132px_1fr]">
-        <aside className="border-b bg-sidebar/90 lg:sticky lg:top-0 lg:h-screen lg:self-start lg:overflow-y-auto lg:border-b-0 lg:border-r">
-          <div className="flex h-full flex-col">
-            <div className="flex min-h-14 items-center gap-2 border-b px-2 py-2.5">
-              <div className="flex h-7 w-7 items-center justify-center rounded-md bg-primary text-primary-foreground">
-                <Network className="h-3.5 w-3.5" />
-              </div>
-              <div className="truncate text-[13px] font-semibold">
-                CPA Nexus
-              </div>
-            </div>
-            <nav className="flex gap-1 overflow-x-auto p-1 lg:flex-col lg:overflow-visible">
-              {navItems.map((item) => {
-                const Icon = item.icon;
-                return (
-                  <a
-                    key={item.id}
-                    href={item.href}
-                    onClick={(event) =>
-                      navigateSection(event, item.id, item.href)
-                    }
-                    className={cn(
-                      "flex h-8 min-w-max items-center gap-1.5 rounded-md px-1.5 text-[12.5px] transition-colors",
-                      activeSection === item.id
-                        ? "bg-sidebar-accent text-sidebar-accent-foreground"
-                        : "text-muted-foreground hover:bg-sidebar-accent/70 hover:text-foreground",
-                    )}
-                  >
-                    <Icon className="h-3.5 w-3.5 shrink-0" />
-                    {item.label}
-                  </a>
-                );
-              })}
-            </nav>
-          </div>
+      {sidebar.mode === "auto" ? (
+        <>
+          <div
+            aria-hidden
+            className="fixed left-0 top-0 z-30 hidden h-screen w-2 lg:block"
+            onMouseEnter={() => sidebar.setAutoOpen(true)}
+          />
+          <aside
+            onMouseEnter={() => sidebar.setAutoOpen(true)}
+            onMouseLeave={() => {
+              if (!sidebar.resizing) {
+                sidebar.setAutoOpen(false);
+              }
+            }}
+            style={{ "--sidebar-w": `${sidebar.width}px` } as CSSProperties}
+            className={cn(
+              "fixed left-0 top-0 z-40 hidden h-screen w-[var(--sidebar-w)] overflow-y-auto border-r bg-sidebar shadow-xl transition-transform duration-200 lg:block",
+              sidebar.autoOpen ? "translate-x-0" : "-translate-x-full",
+            )}
+          >
+            {renderSidebarInner(false)}
+            {renderSidebarResizeHandle()}
+          </aside>
+        </>
+      ) : null}
+
+      <div
+        className={cn(
+          "grid min-h-screen grid-cols-1",
+          sidebar.mode !== "auto" &&
+            "lg:[grid-template-columns:var(--sidebar-cols)]",
+        )}
+        style={
+          {
+            "--sidebar-w": `${sidebar.width}px`,
+            "--sidebar-cols": sidebarColumns,
+          } as CSSProperties
+        }
+      >
+        <aside
+          className={cn(
+            "relative border-b bg-sidebar/90",
+            sidebar.mode === "auto"
+              ? "lg:hidden"
+              : "lg:sticky lg:top-0 lg:h-screen lg:self-start lg:overflow-y-auto lg:border-b-0 lg:border-r",
+          )}
+        >
+          {renderSidebarInner(sidebarCollapsed)}
+          {sidebar.mode === "expanded" ? renderSidebarResizeHandle() : null}
         </aside>
 
         <main className="min-w-0">
@@ -1694,6 +1788,7 @@ export function CpaDashboard({
               <h1 className="text-xl font-semibold">{activeLabel}</h1>
             </div>
             <div className="flex flex-wrap items-center gap-2">
+              <ThemeToggle />
               <Button
                 size="sm"
                 title={syncButtonTitle}

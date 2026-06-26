@@ -117,6 +117,113 @@
   --sidebar-ring: oklch(0.556 0 0);
 }
 
+/* ---------------------------------------------------------------------------
+ * Accent color themes
+ * Selected via the `data-theme` attribute on <html>. The `.dark[data-theme]`
+ * selectors override the dark-mode palette. "neutral" is the default and needs
+ * no attribute. Only accent-related tokens are overridden so the neutral
+ * surfaces/borders stay consistent across themes.
+ * ------------------------------------------------------------------------- */
+
+[data-theme="blue"] {
+  --primary: oklch(0.55 0.18 256);
+  --primary-foreground: oklch(0.985 0.01 256);
+  --ring: oklch(0.55 0.18 256);
+  --sidebar-primary: oklch(0.55 0.18 256);
+  --sidebar-ring: oklch(0.55 0.18 256);
+  --chart-1: oklch(0.62 0.17 256);
+}
+.dark[data-theme="blue"] {
+  --primary: oklch(0.7 0.14 256);
+  --primary-foreground: oklch(0.2 0.04 256);
+  --ring: oklch(0.7 0.14 256);
+  --sidebar-primary: oklch(0.7 0.14 256);
+  --sidebar-ring: oklch(0.7 0.14 256);
+  --chart-1: oklch(0.7 0.14 256);
+}
+
+[data-theme="emerald"] {
+  --primary: oklch(0.6 0.13 162);
+  --primary-foreground: oklch(0.985 0.01 162);
+  --ring: oklch(0.6 0.13 162);
+  --sidebar-primary: oklch(0.6 0.13 162);
+  --sidebar-ring: oklch(0.6 0.13 162);
+  --chart-1: oklch(0.66 0.13 162);
+}
+.dark[data-theme="emerald"] {
+  --primary: oklch(0.72 0.14 162);
+  --primary-foreground: oklch(0.2 0.04 162);
+  --ring: oklch(0.72 0.14 162);
+  --sidebar-primary: oklch(0.72 0.14 162);
+  --sidebar-ring: oklch(0.72 0.14 162);
+  --chart-1: oklch(0.72 0.14 162);
+}
+
+[data-theme="violet"] {
+  --primary: oklch(0.55 0.22 290);
+  --primary-foreground: oklch(0.985 0.01 290);
+  --ring: oklch(0.55 0.22 290);
+  --sidebar-primary: oklch(0.55 0.22 290);
+  --sidebar-ring: oklch(0.55 0.22 290);
+  --chart-1: oklch(0.62 0.2 290);
+}
+.dark[data-theme="violet"] {
+  --primary: oklch(0.72 0.17 290);
+  --primary-foreground: oklch(0.2 0.04 290);
+  --ring: oklch(0.72 0.17 290);
+  --sidebar-primary: oklch(0.72 0.17 290);
+  --sidebar-ring: oklch(0.72 0.17 290);
+  --chart-1: oklch(0.72 0.17 290);
+}
+
+[data-theme="rose"] {
+  --primary: oklch(0.58 0.2 12);
+  --primary-foreground: oklch(0.985 0.01 12);
+  --ring: oklch(0.58 0.2 12);
+  --sidebar-primary: oklch(0.58 0.2 12);
+  --sidebar-ring: oklch(0.58 0.2 12);
+  --chart-1: oklch(0.64 0.19 12);
+}
+.dark[data-theme="rose"] {
+  --primary: oklch(0.71 0.17 12);
+  --primary-foreground: oklch(0.2 0.04 12);
+  --ring: oklch(0.71 0.17 12);
+  --sidebar-primary: oklch(0.71 0.17 12);
+  --sidebar-ring: oklch(0.71 0.17 12);
+  --chart-1: oklch(0.71 0.17 12);
+}
+
+[data-theme="amber"] {
+  --primary: oklch(0.72 0.16 65);
+  --primary-foreground: oklch(0.28 0.05 65);
+  --ring: oklch(0.72 0.16 65);
+  --sidebar-primary: oklch(0.72 0.16 65);
+  --sidebar-ring: oklch(0.72 0.16 65);
+  --chart-1: oklch(0.76 0.15 65);
+}
+.dark[data-theme="amber"] {
+  --primary: oklch(0.8 0.15 70);
+  --primary-foreground: oklch(0.25 0.05 70);
+  --ring: oklch(0.8 0.15 70);
+  --sidebar-primary: oklch(0.8 0.15 70);
+  --sidebar-ring: oklch(0.8 0.15 70);
+  --chart-1: oklch(0.8 0.15 70);
+}
+
+/* ---------------------------------------------------------------------------
+ * UI density
+ * Tailwind v4 derives every spacing/size utility (p-*, gap-*, h-*, ...) from
+ * `--spacing`, so overriding it on the root rescales the whole layout
+ * proportionally. "standard" is the default (Tailwind's 0.25rem) and needs no
+ * attribute. Selected via the `data-density` attribute on <html>.
+ * ------------------------------------------------------------------------- */
+[data-density="compact"] {
+  --spacing: 0.2rem;
+}
+[data-density="loose"] {
+  --spacing: 0.32rem;
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;

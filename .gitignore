@@ -39,6 +39,10 @@ config.toml
 # vercel
 .vercel
 
+# editor / tooling artifacts
+/.vscode/
+/.codex-artifacts/
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts

@@ -13,6 +13,7 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { ThemeToggle } from "@/components/theme-toggle";
 
 export function LoginPage() {
   const [password, setPassword] = useState("");
@@ -43,7 +44,10 @@ export function LoginPage() {
   }
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-[color-mix(in_oklch,var(--background),var(--muted)_35%)] p-6">
+    <main className="relative flex min-h-screen items-center justify-center bg-[color-mix(in_oklch,var(--background),var(--muted)_35%)] p-6">
+      <div className="absolute right-4 top-4">
+        <ThemeToggle />
+      </div>
       <Card className="w-full max-w-sm">
         <CardHeader>
           <div className="mb-2 flex h-10 w-10 items-center justify-center rounded-md bg-primary text-primary-foreground">
