@@ -623,7 +623,7 @@ export function MessagePushSection() {
                 required
               />
               <div className="text-xs text-muted-foreground">
-                可用变量：{"{{msg}}"}、{"{{trigger}}"}、{"{{cpaName}}"}、{"{{value}}"}、{"{{threshold}}"}、{"{{accountCount}}"}
+                可用变量：{"{{msg}}"}、{"{{trigger}}"}、{"{{cpaName}}"}、{"{{value}}"}、{"{{threshold}}"}、{"{{accountCount}}"}、{"{{exceptionByType}}"}
               </div>
             </Field>
 

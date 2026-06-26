@@ -170,6 +170,54 @@ describe("message push evaluation", () => {
     });
   });
 
+  it("aggregates exception accounts by subscription type", async () => {
+    const sqlite = await setupSqlite();
+    const cpaInstanceId = insertInstance(sqlite, "Typed CPA");
+    insertAuthFile(sqlite, cpaInstanceId, "plus-1@example.com", false, "refresh failed");
+    insertAuthFile(sqlite, cpaInstanceId, "plus-2@example.com", false, "refresh failed");
+    insertAuthFile(sqlite, cpaInstanceId, "pro-1@example.com", false, "refresh failed");
+    insertQuotaSnapshot(sqlite, {
+      cpaInstanceId,
+      authFileName: "plus-1@example.com.json",
+      email: "plus-1@example.com",
+      available: false,
+      exception: "refresh failed",
+      rawJson: JSON.stringify({ plan_type: "plus" }),
+    });
+    insertQuotaSnapshot(sqlite, {
+      cpaInstanceId,
+      authFileName: "plus-2@example.com.json",
+      email: "plus-2@example.com",
+      available: false,
+      exception: "refresh failed",
+      rawJson: JSON.stringify({ plan_type: "Plus" }),
+    });
+    insertQuotaSnapshot(sqlite, {
+      cpaInstanceId,
+      authFileName: "pro-1@example.com.json",
+      email: "pro-1@example.com",
+      available: false,
+      exception: "refresh failed",
+      rawJson: JSON.stringify({ plan_type: "pro" }),
+    });
+    insertPolicy(sqlite, {
+      name: "typed exceptions",
+      triggerType: "account_exception",
+      thresholdPercent: null,
+      bodyTemplate: "死号：{{exceptionByType}}",
+    });
+
+    const { evaluateMessagePushPoliciesForCpa } = await import("./message-push");
+
+    await evaluateMessagePushPoliciesForCpa(cpaInstanceId);
+
+    const fetchMock = vi.mocked(fetch);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
+      body: "死号：plus 2个、pro 1个",
+    });
+  });
+
   it("does not treat rate-limited accounts as account exceptions", async () => {
     const sqlite = await setupSqlite();
     const cpaInstanceId = insertInstance(sqlite, "Limited CPA");
@@ -232,7 +280,7 @@ describe("message push evaluation", () => {
     ).toEqual({
       delivery_type: "browser_notification",
       status: "success",
-      message: "浏览器通知：Browser CPA 有 1 个账号异常：dead-browser@example.com",
+      message: "浏览器通知：Browser CPA 有 1 个账号异常（未知 1个）：dead-browser@example.com",
       response_status: null,
       response_body: "queued for open browser sessions",
     });
@@ -267,12 +315,12 @@ describe("message push evaluation", () => {
       {
         delivery_type: "webhook",
         status: "success",
-        message: "Combined CPA 有 1 个账号异常：dead-combined@example.com",
+        message: "Combined CPA 有 1 个账号异常（未知 1个）：dead-combined@example.com",
       },
       {
         delivery_type: "browser_notification",
         status: "success",
-        message: "Combined CPA 有 1 个账号异常：dead-combined@example.com",
+        message: "Combined CPA 有 1 个账号异常（未知 1个）：dead-combined@example.com",
       },
     ]);
   });

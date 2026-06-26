@@ -37,6 +37,7 @@ type CpaSnapshot = {
   accountCount: number;
   exceptionCount: number;
   exceptionSummary: string;
+  exceptionByType: string;
   remaining5hPercent: number | null;
   remainingWeekPercent: number | null;
 };
@@ -59,6 +60,7 @@ const testMessagePushVars = {
   value: 10,
   threshold: 20,
   accountCount: 52,
+  exceptionByType: "plus 2个、pro 1个",
 } as const;
 
 export async function evaluateMessagePushPoliciesForCpa(cpaInstanceId: number) {
@@ -174,6 +176,7 @@ async function evaluatePolicyForSnapshot(
       value: evaluation.value,
       threshold: evaluation.threshold,
       accountCount: snapshot.accountCount,
+      exceptionByType: snapshot.exceptionByType,
     });
     await deliverAndRecord(policy, cpaInstanceId, evaluation, body, now);
     upsertActiveState(policy.id, cpaInstanceId, evaluation, now);
@@ -221,6 +224,7 @@ function buildCpaSnapshot(cpaInstanceId: number, cpaName: string): CpaSnapshot {
       .slice(0, 5)
       .map((file) => file.email ?? file.fileName)
       .join("、"),
+    exceptionByType: summarizeExceptionByType(exceptionFiles, latestQuotas),
     remaining5hPercent: averageAccountRemainingPercent(
       accountRows,
       "usage5hPercent",
@@ -238,7 +242,7 @@ function evaluateTrigger(
 ): TriggerEvaluation {
   if (policy.triggerType === "account_exception") {
     const message = snapshot.exceptionCount > 0
-      ? `${snapshot.cpaName} 有 ${snapshot.exceptionCount} 个账号异常：${snapshot.exceptionSummary}`
+      ? `${snapshot.cpaName} 有 ${snapshot.exceptionCount} 个账号异常（${snapshot.exceptionByType}）：${snapshot.exceptionSummary}`
       : `${snapshot.cpaName} 暂无账号异常`;
     return {
       active: snapshot.exceptionCount > 0,
@@ -419,6 +423,24 @@ function isExceptionAuthFile(file: AuthFile, quotas: QuotaSnapshotForStatus[]) {
   const status = resolveAuthFileQuotaStatus(file, quota);
 
   return status.state === "exception";
+}
+
+function summarizeExceptionByType(
+  exceptionFiles: AuthFile[],
+  quotas: QuotaSnapshotForStatus[],
+) {
+  const counts = new Map<string, number>();
+  for (const file of exceptionFiles) {
+    const quota = matchingQuotaSnapshot(file, quotas);
+    const type = extractSubscriptionType(quota?.rawJson ?? null);
+    const label = type && type.trim() ? type.trim().toLowerCase() : "未知";
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+  }
+
+  return Array.from(counts.entries())
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([type, count]) => `${type} ${count}个`)
+    .join("、");
 }
 
 function accountRemainingPercentRow(
