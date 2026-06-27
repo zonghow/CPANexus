@@ -91,6 +91,8 @@ export function migrate() {
       email TEXT,
       usage_5h_percent REAL,
       usage_week_percent REAL,
+      prev_usage_5h_percent REAL,
+      prev_usage_week_percent REAL,
       available INTEGER NOT NULL DEFAULT 1,
       exception TEXT,
       raw_json TEXT,
@@ -341,6 +343,14 @@ export function migrate() {
 
   if (!hasColumn(sqlite, "message_push_deliveries", "delivery_type")) {
     sqlite.exec("ALTER TABLE message_push_deliveries ADD COLUMN delivery_type TEXT NOT NULL DEFAULT 'webhook'");
+  }
+
+  if (!hasColumn(sqlite, "quota_snapshots", "prev_usage_5h_percent")) {
+    sqlite.exec("ALTER TABLE quota_snapshots ADD COLUMN prev_usage_5h_percent REAL");
+  }
+
+  if (!hasColumn(sqlite, "quota_snapshots", "prev_usage_week_percent")) {
+    sqlite.exec("ALTER TABLE quota_snapshots ADD COLUMN prev_usage_week_percent REAL");
   }
 
   const seed = sqlite.prepare(`

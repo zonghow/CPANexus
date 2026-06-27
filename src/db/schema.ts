@@ -113,6 +113,8 @@ export const quotaSnapshots = sqliteTable("quota_snapshots", {
   email: text("email"),
   usage5hPercent: real("usage_5h_percent"),
   usageWeekPercent: real("usage_week_percent"),
+  prevUsage5hPercent: real("prev_usage_5h_percent"),
+  prevUsageWeekPercent: real("prev_usage_week_percent"),
   available: integer("available", { mode: "boolean" }).notNull().default(true),
   exception: text("exception"),
   rawJson: text("raw_json"),

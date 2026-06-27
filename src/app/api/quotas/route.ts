@@ -24,43 +24,38 @@ export async function GET(request: Request) {
         .from(quotaSnapshots)
         .where(eq(quotaSnapshots.cpaInstanceId, instance.id))
         .orderBy(desc(quotaSnapshots.capturedAt))
-        .limit(300)
+        .limit(2000)
         .all();
 
       return {
         instance,
-        quotas: groupByAccount(rows).map(({ latest, source5h, sourceWeek }) => {
+        quotas: latestByAccount(rows).map((row) => {
           const quotaStatus = resolveAccountQuotaStatus({
             disabled: false,
-            available: latest.available,
-            exception: latest.exception,
-            rawJson: latest.rawJson,
+            available: row.available,
+            exception: row.exception,
+            rawJson: row.rawJson,
           });
 
-          const { usage5hResetAt } = extractQuotaResetTimes(
-            source5h?.rawJson ?? null,
-            source5h?.capturedAt,
-          );
-          const { usageWeekResetAt } = extractQuotaResetTimes(
-            sourceWeek?.rawJson ?? null,
-            sourceWeek?.capturedAt,
-          );
+          // `usage_*` stay null for failed/dead accounts so averages and the
+          // data board keep excluding them; fall back to `prev_usage_*` only
+          // for display, flagged as stale so the UI marks it as old data.
+          const usage5hStale =
+            row.usage5hPercent === null && row.prevUsage5hPercent !== null;
+          const usageWeekStale =
+            row.usageWeekPercent === null && row.prevUsageWeekPercent !== null;
 
           return {
-            ...latest,
-            subscriptionType:
-              extractSubscriptionType(latest.rawJson) ??
-              extractSubscriptionType(source5h?.rawJson ?? null) ??
-              extractSubscriptionType(sourceWeek?.rawJson ?? null),
+            ...row,
+            subscriptionType: extractSubscriptionType(row.rawJson),
             quotaStatus: quotaStatus.state,
             quotaStatusLabel: quotaStatus.label,
-            usage5hPercent: source5h?.usage5hPercent ?? null,
-            usageWeekPercent: sourceWeek?.usageWeekPercent ?? null,
-            usage5hStale: latest.usage5hPercent === null && source5h !== null,
-            usageWeekStale: latest.usageWeekPercent === null && sourceWeek !== null,
+            usage5hPercent: row.usage5hPercent ?? row.prevUsage5hPercent,
+            usageWeekPercent: row.usageWeekPercent ?? row.prevUsageWeekPercent,
+            usage5hStale,
+            usageWeekStale,
             rawJson: null,
-            usage5hResetAt,
-            usageWeekResetAt,
+            ...extractQuotaResetTimes(row.rawJson, row.capturedAt),
           };
         }),
       };
@@ -72,44 +67,17 @@ export async function GET(request: Request) {
   }
 }
 
-type QuotaSnapshotRow = {
-  email: string | null;
-  authFileName: string | null;
-  usage5hPercent: number | null;
-  usageWeekPercent: number | null;
-};
-
-/**
- * Groups snapshots (already ordered newest-first) by account and, for each
- * account, exposes the latest snapshot plus the most recent snapshots that
- * still carry 5h / week usage values. When the latest refresh failed or the
- * account died, its usage columns are null, so we fall back to the last known
- * values instead of showing nothing. The account's status still comes from the
- * latest snapshot, so exception accounts remain excluded from averages.
- */
-function groupByAccount<T extends QuotaSnapshotRow>(rows: T[]) {
-  const order: string[] = [];
-  const groups = new Map<string, T[]>();
+function latestByAccount<T extends { email: string | null; authFileName: string | null }>(rows: T[]) {
+  const seen = new Set<string>();
+  const result: T[] = [];
   for (const row of rows) {
     const key = row.email || row.authFileName;
-    if (!key) {
+    if (!key || seen.has(key)) {
       continue;
     }
-    const existing = groups.get(key);
-    if (existing) {
-      existing.push(row);
-    } else {
-      groups.set(key, [row]);
-      order.push(key);
-    }
+    seen.add(key);
+    result.push(row);
   }
 
-  return order.map((key) => {
-    const group = groups.get(key)!;
-    return {
-      latest: group[0],
-      source5h: group.find((row) => row.usage5hPercent !== null) ?? null,
-      sourceWeek: group.find((row) => row.usageWeekPercent !== null) ?? null,
-    };
-  });
+  return result;
 }

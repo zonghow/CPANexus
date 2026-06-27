@@ -201,6 +201,14 @@ export async function refreshAuthFileQuotaById(authFileId: number): Promise<CpaI
     );
     const capturedAt = nowIso();
 
+    const previousUsage = loadPreviousUsageByAccount(
+      db
+        .select()
+        .from(quotaSnapshots)
+        .where(quotaSnapshotIdentityCondition(authFile))
+        .all(),
+    );
+
     deleteQuotaSnapshotsForAuthFile(authFile);
 
     if (snapshots.length === 0) {
@@ -222,6 +230,7 @@ export async function refreshAuthFileQuotaById(authFileId: number): Promise<CpaI
     }
 
     for (const snapshot of snapshots) {
+      const prev = carryForwardUsage(snapshot, previousUsage);
       db.insert(quotaSnapshots)
         .values({
           cpaInstanceId: instance.id,
@@ -229,6 +238,8 @@ export async function refreshAuthFileQuotaById(authFileId: number): Promise<CpaI
           email: snapshot.email,
           usage5hPercent: snapshot.usage5hPercent,
           usageWeekPercent: snapshot.usageWeekPercent,
+          prevUsage5hPercent: prev.prevUsage5hPercent,
+          prevUsageWeekPercent: prev.prevUsageWeekPercent,
           available: snapshot.available,
           exception: snapshot.exception,
           rawJson: JSON.stringify(snapshot.raw),
@@ -480,9 +491,86 @@ function dateToIso(value: string | number) {
   return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null;
 }
 
+type PreviousUsage = {
+  usage5hPercent: number | null;
+  usageWeekPercent: number | null;
+  prevUsage5hPercent: number | null;
+  prevUsageWeekPercent: number | null;
+};
+
+type QuotaSnapshotIdentity = {
+  email: string | null;
+  authFileName: string | null;
+};
+
+/**
+ * Builds a lookup of the last-known usage per account from the snapshots that
+ * exist before a sync rebuild. `quota_snapshots` is a current-state table that
+ * is deleted and recreated on every sync, so this captures the previous row so
+ * we can carry forward usage when an account's refresh fails or it dies.
+ */
+function loadPreviousUsageByAccount(
+  rows: Array<PreviousUsage & QuotaSnapshotIdentity>,
+) {
+  const byKey = new Map<string, PreviousUsage>();
+  for (const row of rows) {
+    const usage: PreviousUsage = {
+      usage5hPercent: row.usage5hPercent,
+      usageWeekPercent: row.usageWeekPercent,
+      prevUsage5hPercent: row.prevUsage5hPercent,
+      prevUsageWeekPercent: row.prevUsageWeekPercent,
+    };
+    if (row.email) {
+      byKey.set(`email:${row.email.toLowerCase()}`, usage);
+    }
+    if (row.authFileName) {
+      byKey.set(`file:${row.authFileName}`, usage);
+    }
+  }
+  return byKey;
+}
+
+/**
+ * Returns the freshest known usage for an account: the current value when the
+ * probe succeeded, otherwise the last value carried from a previous snapshot.
+ */
+function carryForwardUsage(
+  snapshot: NormalizedQuotaSnapshot,
+  previousUsage: Map<string, PreviousUsage>,
+) {
+  const prev =
+    (snapshot.email
+      ? previousUsage.get(`email:${snapshot.email.toLowerCase()}`)
+      : undefined) ??
+    (snapshot.authFileName
+      ? previousUsage.get(`file:${snapshot.authFileName}`)
+      : undefined);
+
+  return {
+    prevUsage5hPercent:
+      snapshot.usage5hPercent ??
+      prev?.prevUsage5hPercent ??
+      prev?.usage5hPercent ??
+      null,
+    prevUsageWeekPercent:
+      snapshot.usageWeekPercent ??
+      prev?.prevUsageWeekPercent ??
+      prev?.usageWeekPercent ??
+      null,
+  };
+}
+
 async function syncQuotasForInstance(instance: CpaInstance, remoteFiles?: RemoteAuthFile[]) {
   const snapshots = await refreshRemoteQuotas(instance, remoteFiles);
   const capturedAt = nowIso();
+
+  const previousUsage = loadPreviousUsageByAccount(
+    db
+      .select()
+      .from(quotaSnapshots)
+      .where(eq(quotaSnapshots.cpaInstanceId, instance.id))
+      .all(),
+  );
 
   db.delete(quotaSnapshots)
     .where(eq(quotaSnapshots.cpaInstanceId, instance.id))
@@ -497,6 +585,7 @@ async function syncQuotasForInstance(instance: CpaInstance, remoteFiles?: Remote
     .run();
 
   for (const snapshot of snapshots) {
+    const prev = carryForwardUsage(snapshot, previousUsage);
     db.insert(quotaSnapshots)
       .values({
         cpaInstanceId: instance.id,
@@ -504,6 +593,8 @@ async function syncQuotasForInstance(instance: CpaInstance, remoteFiles?: Remote
         email: snapshot.email,
         usage5hPercent: snapshot.usage5hPercent,
         usageWeekPercent: snapshot.usageWeekPercent,
+        prevUsage5hPercent: prev.prevUsage5hPercent,
+        prevUsageWeekPercent: prev.prevUsageWeekPercent,
         available: snapshot.available,
         exception: snapshot.exception,
         rawJson: JSON.stringify(snapshot.raw),
@@ -595,13 +686,17 @@ function updateAuthFileAvailabilityFromQuota(
   }
 }
 
-function deleteQuotaSnapshotsForAuthFile(authFile: AuthFile) {
+function quotaSnapshotIdentityCondition(authFile: AuthFile) {
   const emailCondition = authFile.email
     ? sql`lower(${quotaSnapshots.email}) = ${authFile.email.toLowerCase()}`
     : null;
-  const identityCondition = emailCondition
+  return emailCondition
     ? or(eq(quotaSnapshots.authFileName, authFile.fileName), emailCondition)
     : eq(quotaSnapshots.authFileName, authFile.fileName);
+}
+
+function deleteQuotaSnapshotsForAuthFile(authFile: AuthFile) {
+  const identityCondition = quotaSnapshotIdentityCondition(authFile);
 
   db.delete(quotaSnapshots)
     .where(and(eq(quotaSnapshots.cpaInstanceId, authFile.cpaInstanceId), identityCondition))
