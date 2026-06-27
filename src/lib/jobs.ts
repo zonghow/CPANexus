@@ -23,6 +23,7 @@ import {
   type RemoteAuthFile,
 } from "./cpa-client";
 import { evaluateMessagePushPoliciesForCpa } from "./message-push";
+import type { NormalizedQuotaSnapshot } from "./quota";
 
 export const jobKeys = {
   sync: "sync-cpa-instances",
