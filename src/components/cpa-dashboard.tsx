@@ -159,6 +159,8 @@ type QuotaSnapshot = {
   exception: string | null;
   rawJson: string | null;
   capturedAt: string;
+  usage5hStale?: boolean;
+  usageWeekStale?: boolean;
 };
 
 type CandidateAuthFile = {
@@ -6221,6 +6223,8 @@ type AuthFileQuotaRow = {
   usageWeekPercent: number | null;
   usage5hResetAt: string | null;
   usageWeekResetAt: string | null;
+  usage5hStale: boolean;
+  usageWeekStale: boolean;
   exception: string | null;
   createdAt: string;
   refreshedAt: string;
@@ -6349,6 +6353,7 @@ function CompactAuthFileTable({
                       value={row.usage5hPercent}
                       resetAt={row.usage5hResetAt}
                       nowMs={nowMs}
+                      stale={row.usage5hStale}
                     />
                   </TableCell>
                   <TableCell className="w-24 px-2 py-1">
@@ -6356,6 +6361,7 @@ function CompactAuthFileTable({
                       value={row.usageWeekPercent}
                       resetAt={row.usageWeekResetAt}
                       nowMs={nowMs}
+                      stale={row.usageWeekStale}
                     />
                   </TableCell>
                   <TableCell className="w-16 px-2 py-1">
@@ -6755,6 +6761,8 @@ function mergeAuthFilesWithQuotas(
       usageWeekPercent: quota?.usageWeekPercent ?? null,
       usage5hResetAt: quota?.usage5hResetAt ?? null,
       usageWeekResetAt: quota?.usageWeekResetAt ?? null,
+      usage5hStale: quota?.usage5hStale ?? false,
+      usageWeekStale: quota?.usageWeekStale ?? false,
       exception,
       createdAt: file.createdAt,
       refreshedAt: quota?.capturedAt ?? file.lastSyncedAt,
@@ -6807,21 +6815,27 @@ function CompactPercentBar({
   value,
   resetAt,
   nowMs,
+  stale = false,
 }: {
   value: number | null;
   resetAt: string | null;
   nowMs: number;
+  stale?: boolean;
 }) {
   const remaining =
     value === null ? null : Math.max(0, Math.min(100, 100 - value));
   const width = remaining ?? 0;
   const tone = quotaRemainingTone(remaining);
   const resetLabel = formatQuotaResetCountdown(resetAt, nowMs);
+  const isStale = stale && remaining !== null;
 
   return (
     <div
-      className="inline-flex h-7 w-[4.5rem] max-w-[4.5rem] flex-col justify-center gap-0.5 align-middle"
-      title={quotaResetTitle(resetAt)}
+      className={cn(
+        "inline-flex h-7 w-[4.5rem] max-w-[4.5rem] flex-col justify-center gap-0.5 align-middle",
+        isStale && "opacity-60",
+      )}
+      title={isStale ? `刷新失败，显示上次数据${quotaResetTitle(resetAt) ? `（${quotaResetTitle(resetAt)}）` : ""}` : quotaResetTitle(resetAt)}
     >
       <div className="h-1.5 rounded bg-muted">
         <div
@@ -6831,7 +6845,7 @@ function CompactPercentBar({
       </div>
       <div className="flex items-center justify-between gap-2 leading-none">
         <span className={cn("text-[11px] tabular-nums", tone.text)}>
-          {remaining === null ? "-" : `${remaining}%`}
+          {remaining === null ? "-" : `${isStale ? "~" : ""}${remaining}%`}
         </span>
         <span className="text-right text-[10px] text-muted-foreground tabular-nums">
           {resetLabel ?? "-"}

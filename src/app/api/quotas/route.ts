@@ -29,21 +29,38 @@ export async function GET(request: Request) {
 
       return {
         instance,
-        quotas: latestByAccount(rows).map((row) => {
+        quotas: groupByAccount(rows).map(({ latest, source5h, sourceWeek }) => {
           const quotaStatus = resolveAccountQuotaStatus({
             disabled: false,
-            available: row.available,
-            exception: row.exception,
-            rawJson: row.rawJson,
+            available: latest.available,
+            exception: latest.exception,
+            rawJson: latest.rawJson,
           });
 
+          const { usage5hResetAt } = extractQuotaResetTimes(
+            source5h?.rawJson ?? null,
+            source5h?.capturedAt,
+          );
+          const { usageWeekResetAt } = extractQuotaResetTimes(
+            sourceWeek?.rawJson ?? null,
+            sourceWeek?.capturedAt,
+          );
+
           return {
-            ...row,
-            subscriptionType: extractSubscriptionType(row.rawJson),
+            ...latest,
+            subscriptionType:
+              extractSubscriptionType(latest.rawJson) ??
+              extractSubscriptionType(source5h?.rawJson ?? null) ??
+              extractSubscriptionType(sourceWeek?.rawJson ?? null),
             quotaStatus: quotaStatus.state,
             quotaStatusLabel: quotaStatus.label,
+            usage5hPercent: source5h?.usage5hPercent ?? null,
+            usageWeekPercent: sourceWeek?.usageWeekPercent ?? null,
+            usage5hStale: latest.usage5hPercent === null && source5h !== null,
+            usageWeekStale: latest.usageWeekPercent === null && sourceWeek !== null,
             rawJson: null,
-            ...extractQuotaResetTimes(row.rawJson, row.capturedAt),
+            usage5hResetAt,
+            usageWeekResetAt,
           };
         }),
       };
@@ -55,17 +72,44 @@ export async function GET(request: Request) {
   }
 }
 
-function latestByAccount<T extends { email: string | null; authFileName: string | null }>(rows: T[]) {
-  const seen = new Set<string>();
-  const result: T[] = [];
+type QuotaSnapshotRow = {
+  email: string | null;
+  authFileName: string | null;
+  usage5hPercent: number | null;
+  usageWeekPercent: number | null;
+};
+
+/**
+ * Groups snapshots (already ordered newest-first) by account and, for each
+ * account, exposes the latest snapshot plus the most recent snapshots that
+ * still carry 5h / week usage values. When the latest refresh failed or the
+ * account died, its usage columns are null, so we fall back to the last known
+ * values instead of showing nothing. The account's status still comes from the
+ * latest snapshot, so exception accounts remain excluded from averages.
+ */
+function groupByAccount<T extends QuotaSnapshotRow>(rows: T[]) {
+  const order: string[] = [];
+  const groups = new Map<string, T[]>();
   for (const row of rows) {
     const key = row.email || row.authFileName;
-    if (!key || seen.has(key)) {
+    if (!key) {
       continue;
     }
-    seen.add(key);
-    result.push(row);
+    const existing = groups.get(key);
+    if (existing) {
+      existing.push(row);
+    } else {
+      groups.set(key, [row]);
+      order.push(key);
+    }
   }
 
-  return result;
+  return order.map((key) => {
+    const group = groups.get(key)!;
+    return {
+      latest: group[0],
+      source5h: group.find((row) => row.usage5hPercent !== null) ?? null,
+      sourceWeek: group.find((row) => row.usageWeekPercent !== null) ?? null,
+    };
+  });
 }
