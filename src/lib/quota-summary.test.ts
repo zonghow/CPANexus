@@ -16,7 +16,7 @@ describe("averageRemainingPercent", () => {
 });
 
 describe("averageAccountRemainingPercent", () => {
-  it("includes limited accounts as 0 remaining and ignores free or exception accounts", () => {
+  it("uses real per-window usage, falling back to 0 only for rate-limited rows without data", () => {
     expect(
       averageAccountRemainingPercent(
         [
@@ -28,7 +28,7 @@ describe("averageAccountRemainingPercent", () => {
           {
             subscriptionType: "plus",
             quotaStatus: "limited",
-            usage5hPercent: 20,
+            usage5hPercent: null,
           },
           {
             subscriptionType: "free",
@@ -46,7 +46,7 @@ describe("averageAccountRemainingPercent", () => {
     ).toBe(25);
   });
 
-  it("treats limited weekly quota rows as 0 remaining even when usage is present", () => {
+  it("uses the real weekly remaining for rate-limited rows when usage is present", () => {
     expect(
       averageAccountRemainingPercent(
         [
@@ -57,6 +57,22 @@ describe("averageAccountRemainingPercent", () => {
           },
         ],
         "usageWeekPercent",
+      ),
+    ).toBe(80);
+  });
+
+  it("treats 5h as 0 when the weekly quota is exhausted, ignoring the reported 5h usage", () => {
+    expect(
+      averageAccountRemainingPercent(
+        [
+          {
+            subscriptionType: "plus",
+            quotaStatus: "available",
+            usage5hPercent: 0,
+            usageWeekPercent: 100,
+          },
+        ],
+        "usage5hPercent",
       ),
     ).toBe(0);
   });

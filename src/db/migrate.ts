@@ -99,6 +99,13 @@ export function migrate() {
       captured_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
 
+    CREATE TABLE IF NOT EXISTS subscription_quotas (
+      subscription_type TEXT PRIMARY KEY,
+      usage_5h_dollars REAL,
+      usage_week_dollars REAL,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
     CREATE TABLE IF NOT EXISTS dashboard_metric_snapshots (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       cpa_instance_id INTEGER NOT NULL REFERENCES cpa_instances(id) ON DELETE CASCADE,

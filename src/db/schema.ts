@@ -294,6 +294,13 @@ export const messagePushDeliveries = sqliteTable(
   ],
 );
 
+export const subscriptionQuotas = sqliteTable("subscription_quotas", {
+  subscriptionType: text("subscription_type").primaryKey(),
+  usage5hDollars: real("usage_5h_dollars"),
+  usageWeekDollars: real("usage_week_dollars"),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+
 export type CpaInstance = typeof cpaInstances.$inferSelect;
 export type NewCpaInstance = typeof cpaInstances.$inferInsert;
 export type AuthFile = typeof authFiles.$inferSelect;
@@ -302,3 +309,4 @@ export type CronJob = typeof cronJobs.$inferSelect;
 export type DashboardMetricSnapshot = typeof dashboardMetricSnapshots.$inferSelect;
 export type Proxy = typeof proxies.$inferSelect;
 export type MessagePushPolicy = typeof messagePushPolicies.$inferSelect;
+export type SubscriptionQuota = typeof subscriptionQuotas.$inferSelect;

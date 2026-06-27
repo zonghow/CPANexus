@@ -27,6 +27,7 @@ import {
   Save,
   Server,
   Trash2,
+  Wallet,
 } from "lucide-react";
 import {
   type ChangeEvent,
@@ -70,6 +71,7 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { DataBoardSection } from "@/components/data-board-section";
 import { MessagePushSection } from "@/components/message-push-section";
+import { QuotaSettingsSection } from "@/components/quota-settings-section";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { SidebarModeMenu } from "@/components/sidebar-mode-menu";
 import { useSidebar } from "@/components/use-sidebar";
@@ -95,7 +97,13 @@ import {
   type CronSimpleMode,
   type CronSimpleSchedule,
 } from "@/lib/cron-presets";
-import { averageAccountRemainingPercent } from "@/lib/quota-summary";
+import {
+  averageAccountRemainingPercent,
+  buildSubscriptionWeightMap,
+  accountQuotaDollars,
+  subscriptionRemainingDollars,
+  type SubscriptionWeightMap,
+} from "@/lib/quota-summary";
 import {
   defaultRtLoginProxyMode,
   type RtLoginProxyMode,
@@ -161,6 +169,12 @@ type QuotaSnapshot = {
   capturedAt: string;
   usage5hStale?: boolean;
   usageWeekStale?: boolean;
+};
+
+type SubscriptionQuotaSetting = {
+  subscriptionType: string;
+  usage5hDollars: number | null;
+  usageWeekDollars: number | null;
 };
 
 type CandidateAuthFile = {
@@ -325,6 +339,7 @@ const navItems = [
   { id: "instances", label: "CPA管理", icon: Server, href: "/instances" },
   { id: "proxies", label: "代理管理", icon: Network, href: "/proxies" },
   { id: "message-push", label: "消息推送", icon: Bell, href: "/message-push" },
+  { id: "quota-settings", label: "额度设置", icon: Wallet, href: "/quota-settings" },
   { id: "jobs", label: "定时任务", icon: Activity, href: "/jobs" },
 ] as const;
 
@@ -414,6 +429,9 @@ export function CpaDashboard({
   >([]);
   const [quotaGroups, setQuotaGroups] = useState<
     Array<{ instance: CpaInstance; quotas: QuotaSnapshot[] }>
+  >([]);
+  const [subscriptionQuotas, setSubscriptionQuotas] = useState<
+    SubscriptionQuotaSetting[]
   >([]);
   const [proxies, setProxies] = useState<ProxyRow[]>([]);
   const [jobs, setJobs] = useState<CronJob[]>([]);
@@ -728,6 +746,7 @@ export function CpaDashboard({
           exceptionRes,
           quotaRes,
           proxyRes,
+          subscriptionQuotaRes,
           jobRes,
         ] = await Promise.all([
           fetchJson<{ instances: CpaInstance[] }>("/api/cpa-instances"),
@@ -762,6 +781,11 @@ export function CpaDashboard({
                 "/api/proxies",
               )
             : Promise.resolve(null),
+          needsAuthFiles
+            ? fetchJson<{ quotas: SubscriptionQuotaSetting[] }>(
+                "/api/subscription-quotas",
+              )
+            : Promise.resolve(null),
           fetchJson<JobsApiResponse>(
             `/api/jobs?${jobsSearchParams.toString()}`,
           ),
@@ -781,6 +805,9 @@ export function CpaDashboard({
         }
         if (proxyRes) {
           setProxies(proxyRes.proxies);
+        }
+        if (subscriptionQuotaRes) {
+          setSubscriptionQuotas(subscriptionQuotaRes.quotas);
         }
         applyJobsResponse(jobRes);
         setDataRefreshVersion((version) => version + 1);
@@ -1841,6 +1868,7 @@ export function CpaDashboard({
               <AuthFilesSection
                 groups={authGroups}
                 quotaGroups={quotaGroups}
+                subscriptionQuotas={subscriptionQuotas}
                 proxies={proxies}
                 updatingCpaIds={effectiveUpdatingCpaIds}
                 syncingCpaIds={effectiveSyncingCpaIds}
@@ -1924,6 +1952,8 @@ export function CpaDashboard({
             ) : null}
 
             {activeSection === "message-push" ? <MessagePushSection /> : null}
+
+            {activeSection === "quota-settings" ? <QuotaSettingsSection /> : null}
 
             {activeSection === "jobs" ? (
               <JobsSection
@@ -2207,6 +2237,7 @@ type SessionJsonDialogState = {
 function AuthFilesSection({
   groups,
   quotaGroups,
+  subscriptionQuotas,
   proxies,
   updatingCpaIds,
   syncingCpaIds,
@@ -2233,6 +2264,7 @@ function AuthFilesSection({
 }: {
   groups: Array<{ instance: CpaInstance; authFiles: AuthFile[] }>;
   quotaGroups: Array<{ instance: CpaInstance; quotas: QuotaSnapshot[] }>;
+  subscriptionQuotas: SubscriptionQuotaSetting[];
   proxies: ProxyRow[];
   updatingCpaIds: Set<number>;
   syncingCpaIds: Set<number>;
@@ -2303,6 +2335,14 @@ function AuthFilesSection({
   const enabledLoginProxies = useMemo(
     () => proxies.filter((proxy) => proxy.enabled),
     [proxies],
+  );
+  const subscriptionWeights5h = useMemo<SubscriptionWeightMap>(
+    () => buildSubscriptionWeightMap(subscriptionQuotas, "usage5hPercent"),
+    [subscriptionQuotas],
+  );
+  const subscriptionWeightsWeek = useMemo<SubscriptionWeightMap>(
+    () => buildSubscriptionWeightMap(subscriptionQuotas, "usageWeekPercent"),
+    [subscriptionQuotas],
   );
   const [deleteTarget, setDeleteTarget] = useState<AuthFileQuotaRow | null>(
     null,
@@ -3198,10 +3238,22 @@ function AuthFilesSection({
     const average5hRemaining = averageAccountRemainingPercent(
       activeRows,
       "usage5hPercent",
+      subscriptionWeights5h,
     );
     const averageWeekRemaining = averageAccountRemainingPercent(
       activeRows,
       "usageWeekPercent",
+      subscriptionWeightsWeek,
+    );
+    const average5hDollars = subscriptionRemainingDollars(
+      activeRows,
+      "usage5hPercent",
+      subscriptionWeights5h,
+    );
+    const averageWeekDollars = subscriptionRemainingDollars(
+      activeRows,
+      "usageWeekPercent",
+      subscriptionWeightsWeek,
     );
     const isUpdating = updatingCpaIds.has(group.instance.id);
     const isSyncing = syncingCpaIds.has(group.instance.id) || isUpdating;
@@ -3586,8 +3638,16 @@ function AuthFilesSection({
             </div>
           </div>
           <div className="flex w-full flex-wrap items-center gap-x-2 gap-y-1 border-t border-border/50 pt-1.5 text-xs text-muted-foreground">
-            <HeaderAverageMeter label="5h" value={average5hRemaining} />
-            <HeaderAverageMeter label="周" value={averageWeekRemaining} />
+            <HeaderAverageMeter
+              label="5h"
+              value={average5hRemaining}
+              dollars={average5hDollars}
+            />
+            <HeaderAverageMeter
+              label="周"
+              value={averageWeekRemaining}
+              dollars={averageWeekDollars}
+            />
             <span className="text-emerald-700">{availableCount} 可用</span>
             {limitedRows.length > 0 ? (
               <span className="text-amber-700">{limitedRows.length} 限额</span>
@@ -3599,6 +3659,8 @@ function AuthFilesSection({
         <CompactAuthFileTable
           rows={rows}
           nowMs={nowMs}
+          weights5h={subscriptionWeights5h}
+          weightsWeek={subscriptionWeightsWeek}
           selectedIds={selectedAuthFileIds}
           onToggleSelect={(id) => {
             const next = new Set(selectedAuthFileIds);
@@ -6236,12 +6298,16 @@ function CompactAuthFileTable({
   selectedIds,
   onToggleSelect,
   onToggleSelectAll,
+  weights5h,
+  weightsWeek,
 }: {
   rows: AuthFileQuotaRow[];
   nowMs: number;
   selectedIds?: Set<number>;
   onToggleSelect?: (id: number) => void;
   onToggleSelectAll?: () => void;
+  weights5h?: SubscriptionWeightMap;
+  weightsWeek?: SubscriptionWeightMap;
 }) {
   return (
     <div className="overflow-x-auto">
@@ -6354,6 +6420,10 @@ function CompactAuthFileTable({
                       resetAt={row.usage5hResetAt}
                       nowMs={nowMs}
                       stale={row.usage5hStale}
+                      quotaDollars={accountQuotaDollars(
+                        row.subscriptionType,
+                        weights5h,
+                      )}
                     />
                   </TableCell>
                   <TableCell className="w-24 px-2 py-1">
@@ -6362,6 +6432,10 @@ function CompactAuthFileTable({
                       resetAt={row.usageWeekResetAt}
                       nowMs={nowMs}
                       stale={row.usageWeekStale}
+                      quotaDollars={accountQuotaDollars(
+                        row.subscriptionType,
+                        weightsWeek,
+                      )}
                     />
                   </TableCell>
                   <TableCell className="w-16 px-2 py-1">
@@ -6401,6 +6475,94 @@ function CompactAuthFileTable({
         </table>
       </div>
     </div>
+  );
+}
+
+function HoverTooltip({
+  lines,
+  className,
+  children,
+}: {
+  lines: Array<string | null | undefined>;
+  className?: string;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  const [position, setPosition] = useState({ left: 0, top: 0 });
+  const triggerRef = useRef<HTMLSpanElement | null>(null);
+  const closeTimerRef = useRef<number | null>(null);
+  const visibleLines = lines.filter(
+    (line): line is string => typeof line === "string" && line.trim().length > 0,
+  );
+  const hasContent = visibleLines.length > 0;
+
+  function clearCloseTimer() {
+    if (closeTimerRef.current !== null) {
+      window.clearTimeout(closeTimerRef.current);
+      closeTimerRef.current = null;
+    }
+  }
+
+  function openTooltip() {
+    if (!hasContent) {
+      return;
+    }
+    clearCloseTimer();
+    const rect = triggerRef.current?.getBoundingClientRect();
+    if (rect) {
+      const maxLeft = Math.max(8, window.innerWidth - 240);
+      setPosition({
+        left: Math.min(Math.max(rect.left, 8), maxLeft),
+        top: rect.top - 6,
+      });
+    }
+    setOpen(true);
+  }
+
+  function scheduleClose() {
+    clearCloseTimer();
+    closeTimerRef.current = window.setTimeout(() => setOpen(false), 120);
+  }
+
+  useEffect(() => {
+    return () => clearCloseTimer();
+  }, []);
+
+  return (
+    <>
+      <span
+        ref={triggerRef}
+        tabIndex={hasContent ? 0 : -1}
+        className={cn("inline-flex", hasContent && "cursor-default", className)}
+        onMouseEnter={openTooltip}
+        onMouseLeave={scheduleClose}
+        onFocus={openTooltip}
+        onBlur={scheduleClose}
+      >
+        {children}
+      </span>
+      {open && hasContent && typeof document !== "undefined"
+        ? createPortal(
+            <div
+              className="fixed z-[100] max-w-xs rounded-md border bg-popover px-2 py-1.5 text-xs text-popover-foreground shadow-lg"
+              style={{
+                left: position.left,
+                top: position.top,
+                transform: "translateY(-100%)",
+              }}
+              onMouseEnter={clearCloseTimer}
+              onMouseLeave={scheduleClose}
+            >
+              {visibleLines.map((line, index) => (
+                <div key={index} className="whitespace-nowrap leading-5 tabular-nums">
+                  {line}
+                </div>
+              ))}
+            </div>,
+            document.body,
+          )
+        : null}
+    </>
   );
 }
 
@@ -6667,17 +6829,23 @@ function CompactPercentHeader({ windowLabel }: { windowLabel: string }) {
 function HeaderAverageMeter({
   label,
   value,
+  dollars,
 }: {
   label: string;
   value: number | null;
+  dollars?: { remaining: number; total: number } | null;
 }) {
   const width = value === null ? 0 : Math.max(0, Math.min(100, value));
   const tone = quotaRemainingTone(value);
+  const dollarLine = dollars
+    ? `剩余 ${formatDollars(dollars.remaining)} / ${formatDollars(dollars.total)}`
+    : null;
 
   return (
-    <span
+    <HoverTooltip
+      lines={[dollarLine]}
       className={cn(
-        "inline-flex items-center gap-1.5 whitespace-nowrap font-medium",
+        "items-center gap-1.5 whitespace-nowrap font-medium",
         tone.text,
       )}
     >
@@ -6691,7 +6859,12 @@ function HeaderAverageMeter({
           style={{ width: `${width}%` }}
         />
       </span>
-    </span>
+      {dollars ? (
+        <span className="tabular-nums text-muted-foreground">
+          {formatDollars(dollars.remaining)}
+        </span>
+      ) : null}
+    </HoverTooltip>
   );
 }
 
@@ -6816,11 +6989,13 @@ function CompactPercentBar({
   resetAt,
   nowMs,
   stale = false,
+  quotaDollars = null,
 }: {
   value: number | null;
   resetAt: string | null;
   nowMs: number;
   stale?: boolean;
+  quotaDollars?: number | null;
 }) {
   const remaining =
     value === null ? null : Math.max(0, Math.min(100, 100 - value));
@@ -6829,29 +7004,36 @@ function CompactPercentBar({
   const resetLabel = formatQuotaResetCountdown(resetAt, nowMs);
   const isStale = stale && remaining !== null;
 
+  const dollarLine =
+    quotaDollars != null && remaining != null
+      ? `剩余 ${formatDollars((quotaDollars * remaining) / 100)} / ${formatDollars(quotaDollars)}`
+      : null;
+  const staleLine = isStale ? "刷新失败，显示上次数据" : null;
+  const resetLine = quotaResetTitle(resetAt);
+
   return (
-    <div
+    <HoverTooltip
+      lines={[dollarLine, staleLine, resetLine]}
       className={cn(
-        "inline-flex h-7 w-[4.5rem] max-w-[4.5rem] flex-col justify-center gap-0.5 align-middle",
+        "h-7 w-[4.5rem] max-w-[4.5rem] flex-col justify-center gap-0.5 align-middle",
         isStale && "opacity-60",
       )}
-      title={isStale ? `刷新失败，显示上次数据${quotaResetTitle(resetAt) ? `（${quotaResetTitle(resetAt)}）` : ""}` : quotaResetTitle(resetAt)}
     >
-      <div className="h-1.5 rounded bg-muted">
-        <div
-          className={cn("h-1.5 rounded", tone.bar)}
+      <span className="block h-1.5 rounded bg-muted">
+        <span
+          className={cn("block h-1.5 rounded", tone.bar)}
           style={{ width: `${width}%` }}
         />
-      </div>
-      <div className="flex items-center justify-between gap-2 leading-none">
+      </span>
+      <span className="flex items-center justify-between gap-2 leading-none">
         <span className={cn("text-[11px] tabular-nums", tone.text)}>
           {remaining === null ? "-" : `${isStale ? "~" : ""}${remaining}%`}
         </span>
         <span className="text-right text-[10px] text-muted-foreground tabular-nums">
           {resetLabel ?? "-"}
         </span>
-      </div>
-    </div>
+      </span>
+    </HoverTooltip>
   );
 }
 
@@ -7854,6 +8036,14 @@ function formatCountdown(seconds: number) {
 
 function formatPercent(value: number | null) {
   return value === null ? "-" : `${value}%`;
+}
+
+function formatDollars(value: number) {
+  const rounded = Math.round(value * 100) / 100;
+  const text = Number.isInteger(rounded)
+    ? String(rounded)
+    : rounded.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
+  return `$${text}`;
 }
 
 function buildCpaManagementHref(baseUrl: string) {

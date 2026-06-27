@@ -13,9 +13,10 @@ import {
   type MessagePushPolicy,
 } from "@/db/schema";
 
-import { averageAccountRemainingPercent } from "./quota-summary";
+import { averageAccountRemainingPercent, buildSubscriptionWeightMap } from "./quota-summary";
 import { resolveAccountQuotaStatus } from "./account-quota-status";
 import { extractSubscriptionType } from "./subscription";
+import { loadSubscriptionQuotaSettings } from "./subscription-quota";
 
 export const messagePushTriggerTypes = [
   "account_exception",
@@ -216,6 +217,8 @@ function buildCpaSnapshot(cpaInstanceId: number, cpaName: string): CpaSnapshot {
     accountRemainingPercentRow(file, latestQuotas),
   );
 
+  const quotaSettings = loadSubscriptionQuotaSettings();
+
   return {
     cpaName,
     accountCount: activeAuthFiles.length,
@@ -228,10 +231,12 @@ function buildCpaSnapshot(cpaInstanceId: number, cpaName: string): CpaSnapshot {
     remaining5hPercent: averageAccountRemainingPercent(
       accountRows,
       "usage5hPercent",
+      buildSubscriptionWeightMap(quotaSettings, "usage5hPercent"),
     ),
     remainingWeekPercent: averageAccountRemainingPercent(
       accountRows,
       "usageWeekPercent",
+      buildSubscriptionWeightMap(quotaSettings, "usageWeekPercent"),
     ),
   };
 }
