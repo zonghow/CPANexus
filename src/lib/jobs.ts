@@ -1,4 +1,4 @@
-import { and, eq, notInArray, or, sql } from "drizzle-orm";
+import { and, eq, isNull, lt, notInArray, or, sql } from "drizzle-orm";
 
 import { db } from "@/db/client";
 import {
@@ -54,6 +54,54 @@ export class CpaInstanceAlreadySyncingError extends Error {
 
 export function isCpaInstanceAlreadySyncingError(error: unknown) {
   return error instanceof CpaInstanceAlreadySyncingError;
+}
+
+const staleRunMaxAgeMs = 15 * 60 * 1000;
+const staleRunMessage = "运行中断（进程重启或超时），已自动清理";
+
+/**
+ * Releases stale run locks left behind when a process is killed mid-run (e.g. a
+ * deploy restart), which would otherwise block all future runs forever via the
+ * partial unique indexes on unfinished runs. Any unfinished run older than
+ * `maxAgeMs` is marked finished so scheduling can resume. Safe to call
+ * repeatedly; the age threshold avoids touching legitimately in-flight runs.
+ */
+export function reclaimStaleRuns(now: Date = new Date(), maxAgeMs = staleRunMaxAgeMs) {
+  const cutoffIso = new Date(now.getTime() - maxAgeMs).toISOString();
+  const finishedAt = now.toISOString();
+
+  const staleJobRuns = db
+    .update(jobRuns)
+    .set({ status: "error", message: staleRunMessage, finishedAt })
+    .where(and(isNull(jobRuns.finishedAt), lt(jobRuns.startedAt, cutoffIso)))
+    .returning({ jobKey: jobRuns.jobKey })
+    .all();
+
+  for (const { jobKey } of staleJobRuns) {
+    db.update(cronJobs)
+      .set({
+        lastStatus: "error",
+        lastError: staleRunMessage,
+        lastRunAt: finishedAt,
+        updatedAt: finishedAt,
+      })
+      .where(and(eq(cronJobs.key, jobKey), eq(cronJobs.lastStatus, "running")))
+      .run();
+  }
+
+  const staleSyncRuns = db
+    .update(cpaInstanceSyncRuns)
+    .set({ status: "error", message: staleRunMessage, finishedAt })
+    .where(
+      and(
+        isNull(cpaInstanceSyncRuns.finishedAt),
+        lt(cpaInstanceSyncRuns.startedAt, cutoffIso),
+      ),
+    )
+    .returning({ id: cpaInstanceSyncRuns.id })
+    .all();
+
+  return staleJobRuns.length + staleSyncRuns.length;
 }
 
 export type JobRunResult = {

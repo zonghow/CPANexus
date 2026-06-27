@@ -5,7 +5,7 @@ import { db } from "../db/client";
 import { migrate } from "../db/migrate";
 import { cronJobs } from "../db/schema";
 import { minuteIntervalMsFromCron, nextCronRunAfterLastRun } from "../lib/cron-next-run";
-import { isJobAlreadyRunningError, runJobByKey } from "../lib/jobs";
+import { isJobAlreadyRunningError, reclaimStaleRuns, runJobByKey } from "../lib/jobs";
 
 type StoppableTask = {
   stop: () => void;
@@ -23,6 +23,10 @@ const activeTasks = new Map<string, ActiveTask>();
 
 function loadSchedules() {
   migrate();
+  const reclaimed = reclaimStaleRuns();
+  if (reclaimed > 0) {
+    console.log(`[worker] reclaimed ${reclaimed} stale run lock(s)`);
+  }
   const jobs = db.select().from(cronJobs).all();
   const seen = new Set<string>();
 
