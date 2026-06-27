@@ -218,6 +218,44 @@ describe("message push evaluation", () => {
     });
   });
 
+  it("falls back to the auth file plan type when the quota snapshot lacks one", async () => {
+    const sqlite = await setupSqlite();
+    const cpaInstanceId = insertInstance(sqlite, "Fallback CPA");
+    insertAuthFile(
+      sqlite,
+      cpaInstanceId,
+      "dead-plus@example.com",
+      false,
+      "refresh failed",
+      JSON.stringify({ plan_type: "plus" }),
+    );
+    // Dead account's quota probe failed, so its snapshot carries no plan_type.
+    insertQuotaSnapshot(sqlite, {
+      cpaInstanceId,
+      authFileName: "dead-plus@example.com.json",
+      email: "dead-plus@example.com",
+      available: false,
+      exception: "refresh failed",
+      rawJson: null,
+    });
+    insertPolicy(sqlite, {
+      name: "fallback exceptions",
+      triggerType: "account_exception",
+      thresholdPercent: null,
+      bodyTemplate: "死号：{{exceptionByType}}",
+    });
+
+    const { evaluateMessagePushPoliciesForCpa } = await import("./message-push");
+
+    await evaluateMessagePushPoliciesForCpa(cpaInstanceId);
+
+    const fetchMock = vi.mocked(fetch);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
+      body: "死号：plus 1个",
+    });
+  });
+
   it("does not treat rate-limited accounts as account exceptions", async () => {
     const sqlite = await setupSqlite();
     const cpaInstanceId = insertInstance(sqlite, "Limited CPA");
@@ -396,6 +434,7 @@ function insertAuthFile(
   email: string,
   available: boolean,
   statusMessage: string | null = null,
+  rawJson: string | null = null,
 ) {
   sqlite
     .prepare(`
@@ -406,9 +445,10 @@ function insertAuthFile(
         status,
         status_message,
         disabled,
-        available
+        available,
+        raw_json
       )
-      VALUES (?, ?, ?, ?, ?, 0, ?)
+      VALUES (?, ?, ?, ?, ?, 0, ?, ?)
     `)
     .run(
       cpaInstanceId,
@@ -417,6 +457,7 @@ function insertAuthFile(
       available ? "可用" : "异常",
       statusMessage,
       available ? 1 : 0,
+      rawJson,
     );
 }
 

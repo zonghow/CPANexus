@@ -432,7 +432,9 @@ function summarizeExceptionByType(
   const counts = new Map<string, number>();
   for (const file of exceptionFiles) {
     const quota = matchingQuotaSnapshot(file, quotas);
-    const type = extractSubscriptionType(quota?.rawJson ?? null);
+    const type =
+      extractSubscriptionType(quota?.rawJson ?? null) ??
+      extractSubscriptionType(file.rawJson);
     const label = type && type.trim() ? type.trim().toLowerCase() : "未知";
     counts.set(label, (counts.get(label) ?? 0) + 1);
   }
