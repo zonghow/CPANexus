@@ -3,6 +3,7 @@ import type { AccountQuotaState } from "./account-quota-status";
 export type AccountSortRow = {
   subscriptionType: string | null;
   quotaStatus?: AccountQuotaState;
+  usageWeekPercent?: number | null;
   email?: string | null;
   fileName?: string | null;
 };
@@ -38,6 +39,15 @@ function compareAccountRows(a: AccountSortRow, b: AccountSortRow) {
     return statusDiff;
   }
 
+  // 限额账号在状态相同的前提下，进一步按周限（周用量百分比）从低到高排序，
+  // 让周配额剩余更多、更快恢复的账号排在前面。
+  if (a.quotaStatus === "limited" && b.quotaStatus === "limited") {
+    const weekDiff = weeklyUsageSortValue(a.usageWeekPercent) - weeklyUsageSortValue(b.usageWeekPercent);
+    if (weekDiff !== 0) {
+      return weekDiff;
+    }
+  }
+
   const tierDiff = subscriptionSortRank(a.subscriptionType) - subscriptionSortRank(b.subscriptionType);
   if (tierDiff !== 0) {
     return tierDiff;
@@ -52,6 +62,11 @@ function subscriptionSortRank(value: string | null) {
   }
 
   return knownSubscriptionRanks[value.trim().toLowerCase()] ?? 98;
+}
+
+function weeklyUsageSortValue(value: number | null | undefined) {
+  // 无周限数据的账号排在最后。
+  return typeof value === "number" && Number.isFinite(value) ? value : Number.POSITIVE_INFINITY;
 }
 
 function accountStatusSortRank(value: AccountQuotaState | undefined) {
