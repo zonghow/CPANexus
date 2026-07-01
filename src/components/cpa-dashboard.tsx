@@ -108,7 +108,7 @@ import {
   defaultRtLoginProxyMode,
   type RtLoginProxyMode,
 } from "@/lib/rt-login-ui";
-import { isFreeSubscriptionType } from "@/lib/subscription";
+import { isFreeSubscriptionType, extractSubscriptionType } from "@/lib/subscription";
 import { cn } from "@/lib/utils";
 
 type CpaInstance = {
@@ -6929,7 +6929,8 @@ function mergeAuthFilesWithQuotas(
       available,
       quotaStatus: quotaStatus.state,
       quotaStatusLabel: quotaStatus.label,
-      subscriptionType: quota?.subscriptionType ?? null,
+      subscriptionType:
+        quota?.subscriptionType ?? extractSubscriptionType(file.rawJson),
       usage5hPercent: quota?.usage5hPercent ?? null,
       usageWeekPercent: quota?.usageWeekPercent ?? null,
       usage5hResetAt: quota?.usage5hResetAt ?? null,
