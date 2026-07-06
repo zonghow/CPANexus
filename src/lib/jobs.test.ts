@@ -416,6 +416,90 @@ describe("sync jobs", () => {
       },
     ]);
   });
+
+  it("keeps same-email auth files separate when applying quota status", async () => {
+    const sqlite = await setupSqlite();
+    const cpaInstanceId = insertInstance(sqlite);
+
+    const cpaClient = await import("@/lib/cpa-client");
+    vi.mocked(cpaClient.listRemoteAuthFiles).mockResolvedValue([
+      { name: "shared-primary.json", email: "shared@example.com", type: "codex" },
+      { name: "shared-secondary.json", email: "shared@example.com", type: "codex" },
+    ]);
+    vi.mocked(cpaClient.refreshRemoteQuotas).mockResolvedValue([
+      {
+        authFileName: "shared-primary.json",
+        email: "shared@example.com",
+        usage5hPercent: 10,
+        usageWeekPercent: 20,
+        available: true,
+        exception: null,
+        raw: { name: "shared-primary.json" },
+      },
+      {
+        authFileName: "shared-secondary.json",
+        email: "shared@example.com",
+        usage5hPercent: 80,
+        usageWeekPercent: 90,
+        available: false,
+        exception: "refresh failed",
+        raw: { name: "shared-secondary.json" },
+      },
+    ]);
+    const jobs = await import("./jobs");
+
+    const result = await jobs.syncCpaInstances();
+
+    expect(result).toMatchObject({ status: "success" });
+    expect(
+      sqlite
+        .prepare(`
+          SELECT file_name, email, available, status, status_message
+          FROM auth_files
+          WHERE cpa_instance_id = ?
+          ORDER BY file_name
+        `)
+        .all(cpaInstanceId),
+    ).toEqual([
+      {
+        file_name: "shared-primary.json",
+        email: "shared@example.com",
+        available: 1,
+        status: "可用",
+        status_message: null,
+      },
+      {
+        file_name: "shared-secondary.json",
+        email: "shared@example.com",
+        available: 0,
+        status: "异常",
+        status_message: "refresh failed",
+      },
+    ]);
+    expect(
+      sqlite
+        .prepare(`
+          SELECT auth_file_name, email, usage_5h_percent, usage_week_percent
+          FROM quota_snapshots
+          WHERE cpa_instance_id = ?
+          ORDER BY auth_file_name
+        `)
+        .all(cpaInstanceId),
+    ).toEqual([
+      {
+        auth_file_name: "shared-primary.json",
+        email: "shared@example.com",
+        usage_5h_percent: 10,
+        usage_week_percent: 20,
+      },
+      {
+        auth_file_name: "shared-secondary.json",
+        email: "shared@example.com",
+        usage_5h_percent: 80,
+        usage_week_percent: 90,
+      },
+    ]);
+  });
 });
 
 describe("refreshAuthFileQuotaById", () => {
@@ -524,6 +608,83 @@ describe("refreshAuthFileQuotaById", () => {
       status: "可用",
       status_message: null,
     });
+  });
+
+  it("does not replace another auth file snapshot with the same email", async () => {
+    const sqlite = await setupSqlite();
+    const cpaInstanceId = insertInstance(sqlite);
+    const authFileId = insertAuthFile(sqlite, cpaInstanceId, {
+      fileName: "shared-primary.json",
+      email: "shared@example.com",
+      authIndex: "auth-primary",
+      rawJson: JSON.stringify({
+        id_token: { chatgpt_account_id: "acct-primary" },
+      }),
+    });
+    insertAuthFile(sqlite, cpaInstanceId, {
+      fileName: "shared-secondary.json",
+      email: "shared@example.com",
+      authIndex: "auth-secondary",
+      rawJson: JSON.stringify({
+        id_token: { chatgpt_account_id: "acct-secondary" },
+      }),
+    });
+    insertQuotaSnapshot(sqlite, cpaInstanceId, {
+      authFileName: "shared-primary.json",
+      email: "shared@example.com",
+      usage5hPercent: 10,
+      usageWeekPercent: 20,
+    });
+    insertQuotaSnapshot(sqlite, cpaInstanceId, {
+      authFileName: "shared-secondary.json",
+      email: "shared@example.com",
+      usage5hPercent: 80,
+      usageWeekPercent: 90,
+    });
+
+    const cpaClient = await import("@/lib/cpa-client");
+    vi.mocked(cpaClient.refreshRemoteQuotas).mockResolvedValue([
+      {
+        authFileName: "shared-primary.json",
+        email: "shared@example.com",
+        usage5hPercent: 12,
+        usageWeekPercent: 22,
+        available: true,
+        exception: null,
+        raw: { refreshed: true },
+      },
+    ]);
+    const jobs = await import("./jobs");
+
+    const result = await jobs.refreshAuthFileQuotaById(authFileId);
+
+    expect(result).toMatchObject({
+      instance: "target",
+      status: "success",
+      message: "refreshed 1 quota snapshot",
+    });
+    expect(
+      sqlite
+        .prepare(`
+          SELECT auth_file_name, email, usage_5h_percent, usage_week_percent
+          FROM quota_snapshots
+          ORDER BY auth_file_name
+        `)
+        .all(),
+    ).toEqual([
+      {
+        auth_file_name: "shared-primary.json",
+        email: "shared@example.com",
+        usage_5h_percent: 12,
+        usage_week_percent: 22,
+      },
+      {
+        auth_file_name: "shared-secondary.json",
+        email: "shared@example.com",
+        usage_5h_percent: 80,
+        usage_week_percent: 90,
+      },
+    ]);
   });
 });
 

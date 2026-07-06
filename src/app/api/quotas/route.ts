@@ -71,7 +71,7 @@ function latestByAccount<T extends { email: string | null; authFileName: string 
   const seen = new Set<string>();
   const result: T[] = [];
   for (const row of rows) {
-    const key = row.email || row.authFileName;
+    const key = quotaAccountKey(row);
     if (!key || seen.has(key)) {
       continue;
     }
@@ -80,4 +80,11 @@ function latestByAccount<T extends { email: string | null; authFileName: string 
   }
 
   return result;
+}
+
+function quotaAccountKey(row: { email: string | null; authFileName: string | null }) {
+  if (row.authFileName) {
+    return `file:${row.authFileName}`;
+  }
+  return row.email ? `email:${row.email.toLowerCase()}` : null;
 }

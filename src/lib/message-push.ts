@@ -487,15 +487,17 @@ function resolveAuthFileQuotaStatus(
 
 function matchingQuotaSnapshot(file: AuthFile, quotas: QuotaSnapshotForStatus[]) {
   const email = file.email?.toLowerCase() ?? null;
-  return quotas.find((snapshot) => {
-    if (snapshot.authFileName && snapshot.authFileName === file.fileName) {
-      return true;
-    }
-    if (email && snapshot.email?.toLowerCase() === email) {
-      return true;
-    }
-    return false;
-  }) ?? null;
+  const matchedByFileName = quotas.find(
+    (snapshot) => snapshot.authFileName === file.fileName,
+  );
+  if (matchedByFileName) {
+    return matchedByFileName;
+  }
+
+  const matchedByEmail = email
+    ? quotas.filter((snapshot) => snapshot.email?.toLowerCase() === email)
+    : [];
+  return matchedByEmail.length === 1 ? matchedByEmail[0] : null;
 }
 
 function latestQuotaSnapshotsByAccount<
@@ -507,7 +509,7 @@ function latestQuotaSnapshotsByAccount<
   const result: T[] = [];
 
   for (const row of rows) {
-    const key = row.email || row.authFileName;
+    const key = quotaAccountKey(row);
     if (!key || seen.has(key)) {
       continue;
     }
@@ -516,6 +518,13 @@ function latestQuotaSnapshotsByAccount<
   }
 
   return result;
+}
+
+function quotaAccountKey(row: { email: string | null; authFileName: string | null }) {
+  if (row.authFileName) {
+    return `file:${row.authFileName}`;
+  }
+  return row.email ? `email:${row.email.toLowerCase()}` : null;
 }
 
 function parseHeadersJson(value: string | null) {

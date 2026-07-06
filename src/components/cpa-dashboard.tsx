@@ -6875,21 +6875,27 @@ function mergeAuthFilesWithQuotas(
 ): AuthFileQuotaRow[] {
   const quotaByFileName = new Map<string, QuotaSnapshot>();
   const quotaByEmail = new Map<string, QuotaSnapshot>();
+  const quotaEmailCounts = new Map<string, number>();
 
   for (const quota of quotas) {
     if (quota.authFileName) {
       quotaByFileName.set(quota.authFileName, quota);
     }
     if (quota.email) {
-      quotaByEmail.set(quota.email.toLowerCase(), quota);
+      const key = quota.email.toLowerCase();
+      quotaByEmail.set(key, quota);
+      quotaEmailCounts.set(key, (quotaEmailCounts.get(key) ?? 0) + 1);
     }
   }
 
   const rows = authFileRows.map((file) => {
     const proxyUrl = file.proxyUrl ?? proxyUrlFromRawAuthJson(file.rawJson);
+    const emailKey = file.email?.toLowerCase() ?? null;
     const quota =
       quotaByFileName.get(file.fileName) ??
-      (file.email ? quotaByEmail.get(file.email.toLowerCase()) : undefined) ??
+      (emailKey && quotaEmailCounts.get(emailKey) === 1
+        ? quotaByEmail.get(emailKey)
+        : undefined) ??
       null;
     const disabled = Boolean(file.disabled);
     const available = disabled ? false : (quota?.available ?? file.available);

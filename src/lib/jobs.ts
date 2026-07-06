@@ -569,11 +569,10 @@ function loadPreviousUsageByAccount(
       prevUsage5hPercent: row.prevUsage5hPercent,
       prevUsageWeekPercent: row.prevUsageWeekPercent,
     };
-    if (row.email) {
-      byKey.set(`email:${row.email.toLowerCase()}`, usage);
-    }
     if (row.authFileName) {
-      byKey.set(`file:${row.authFileName}`, usage);
+      byKey.set(quotaFileKey(row.authFileName), usage);
+    } else if (row.email) {
+      byKey.set(`email:${row.email.toLowerCase()}`, usage);
     }
   }
   return byKey;
@@ -588,11 +587,11 @@ function carryForwardUsage(
   previousUsage: Map<string, PreviousUsage>,
 ) {
   const prev =
+    (snapshot.authFileName
+      ? previousUsage.get(quotaFileKey(snapshot.authFileName))
+      : undefined) ??
     (snapshot.email
       ? previousUsage.get(`email:${snapshot.email.toLowerCase()}`)
-      : undefined) ??
-    (snapshot.authFileName
-      ? previousUsage.get(`file:${snapshot.authFileName}`)
       : undefined);
 
   return {
@@ -720,6 +719,7 @@ function updateAuthFileAvailabilityFromQuota(
         ),
       )
       .run();
+    return;
   }
 
   if (snapshot.email) {
@@ -736,12 +736,16 @@ function updateAuthFileAvailabilityFromQuota(
 }
 
 function quotaSnapshotIdentityCondition(authFile: AuthFile) {
-  const emailCondition = authFile.email
-    ? sql`lower(${quotaSnapshots.email}) = ${authFile.email.toLowerCase()}`
+  const fileCondition = eq(quotaSnapshots.authFileName, authFile.fileName);
+  const legacyEmailCondition = authFile.email
+    ? and(
+        isNull(quotaSnapshots.authFileName),
+        sql`lower(${quotaSnapshots.email}) = ${authFile.email.toLowerCase()}`,
+      )
     : null;
-  return emailCondition
-    ? or(eq(quotaSnapshots.authFileName, authFile.fileName), emailCondition)
-    : eq(quotaSnapshots.authFileName, authFile.fileName);
+  return legacyEmailCondition
+    ? or(fileCondition, legacyEmailCondition)
+    : fileCondition;
 }
 
 function deleteQuotaSnapshotsForAuthFile(authFile: AuthFile) {
@@ -757,17 +761,25 @@ function matchingQuotaSnapshots(
   snapshots: Awaited<ReturnType<typeof refreshRemoteQuotas>>,
 ) {
   const email = authFile.email?.toLowerCase() ?? null;
-  const matched = snapshots.filter((snapshot) => {
-    if (snapshot.authFileName && snapshot.authFileName === authFile.fileName) {
-      return true;
-    }
-    if (email && snapshot.email?.toLowerCase() === email) {
-      return true;
-    }
-    return false;
-  });
+  const matchedByFileName = snapshots.filter(
+    (snapshot) => snapshot.authFileName === authFile.fileName,
+  );
+  if (matchedByFileName.length > 0) {
+    return matchedByFileName;
+  }
 
-  return matched.length > 0 || snapshots.length !== 1 ? matched : snapshots;
+  const matchedByEmail = email
+    ? snapshots.filter((snapshot) => snapshot.email?.toLowerCase() === email)
+    : [];
+  if (matchedByEmail.length === 1) {
+    return matchedByEmail;
+  }
+
+  return snapshots.length === 1 ? snapshots : [];
+}
+
+function quotaFileKey(fileName: string) {
+  return `file:${fileName}`;
 }
 
 function remoteAuthFileFromLocal(authFile: AuthFile): RemoteAuthFile {
