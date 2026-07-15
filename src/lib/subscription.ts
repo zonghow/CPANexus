@@ -10,9 +10,20 @@ export function extractSubscriptionType(rawJson: string | null) {
     }
 
     return (
-      firstString(payload, ["plan_type", "planType", "subscription_type", "subscriptionType"]) ??
+      firstString(payload, [
+        "plan_type",
+        "planType",
+        "subscription_type",
+        "subscriptionType",
+        "plan",
+      ]) ??
       (isRecord(payload.rate_limit)
-        ? firstString(payload.rate_limit, ["plan_type", "planType", "subscription_type", "subscriptionType"])
+        ? firstString(payload.rate_limit, [
+            "plan_type",
+            "planType",
+            "subscription_type",
+            "subscriptionType",
+          ])
         : null) ??
       planTypeFromAuthTokens(payload) ??
       null

@@ -15,11 +15,13 @@ import {
   type CpaInstance,
 } from "@/db/schema";
 
+import { matchesAuthView } from "./auth-provider";
 import { buildDashboardMetricSnapshot } from "./data-board";
 import {
   downloadRemoteAuthFile,
   listRemoteAuthFiles,
   refreshRemoteQuotas,
+  refreshRemoteXaiQuotas,
   type RemoteAuthFile,
 } from "./cpa-client";
 import { evaluateMessagePushPoliciesForCpa } from "./message-push";
@@ -188,7 +190,26 @@ async function performCpaInstanceSync(
     updateCpaInstanceSyncRunPhase(syncRunId, "auth_payloads", "补全认证文件中");
     const payloadResult = await syncAuthFilePayloadsForInstance(instance, remoteFiles);
     updateCpaInstanceSyncRunPhase(syncRunId, "quotas", "刷新配额中");
-    const quotaResult = await syncQuotasForInstance(instance, remoteFiles);
+    applyGrokAuthAvailabilityFromRemote(instance.id, remoteFiles);
+    const codexRemoteFiles = remoteFiles.filter((file) =>
+      matchesAuthView(remoteAuthProvider(file), "codex"),
+    );
+    const grokRemoteFiles = remoteFiles.filter((file) =>
+      matchesAuthView(remoteAuthProvider(file), "grok", {
+        treatMissingAsCodex: false,
+      }),
+    );
+    const codexQuotaResult = await syncQuotasForInstance(
+      instance,
+      codexRemoteFiles,
+      "codex",
+    );
+    const grokQuotaResult = await syncQuotasForInstance(
+      instance,
+      grokRemoteFiles,
+      "grok",
+    );
+    const quotaResult = codexQuotaResult + grokQuotaResult;
     recordDashboardMetricSnapshot(instance.id, nowIso());
     await evaluateMessagePushPoliciesForCpa(instance.id);
 
@@ -244,9 +265,14 @@ export async function refreshAuthFileQuotaById(authFileId: number): Promise<CpaI
 
   try {
     const remoteFile = remoteAuthFileFromLocal(authFile);
+    const isGrok = matchesAuthView(authFile.provider, "grok", {
+      treatMissingAsCodex: false,
+    });
     const snapshots = matchingQuotaSnapshots(
       authFile,
-      await refreshRemoteQuotas(instance, [remoteFile]),
+      isGrok
+        ? await refreshRemoteXaiQuotas(instance, [remoteFile])
+        : await refreshRemoteQuotas(instance, [remoteFile]),
     );
     const capturedAt = nowIso();
 
@@ -608,8 +634,24 @@ function carryForwardUsage(
   };
 }
 
-async function syncQuotasForInstance(instance: CpaInstance, remoteFiles?: RemoteAuthFile[]) {
-  const snapshots = await refreshRemoteQuotas(instance, remoteFiles);
+async function syncQuotasForInstance(
+  instance: CpaInstance,
+  remoteFiles: RemoteAuthFile[] = [],
+  view: "codex" | "grok" = "codex",
+) {
+  const scopedRemoteFiles = remoteFiles.filter((file) =>
+    matchesAuthView(remoteAuthProvider(file), view, {
+      treatMissingAsCodex: view === "codex",
+    }),
+  );
+  if (scopedRemoteFiles.length === 0 && view === "grok") {
+    return 0;
+  }
+
+  const snapshots =
+    view === "grok"
+      ? await refreshRemoteXaiQuotas(instance, scopedRemoteFiles)
+      : await refreshRemoteQuotas(instance, scopedRemoteFiles);
   const capturedAt = nowIso();
 
   const previousUsage = loadPreviousUsageByAccount(
@@ -620,19 +662,51 @@ async function syncQuotasForInstance(instance: CpaInstance, remoteFiles?: Remote
       .all(),
   );
 
-  db.delete(quotaSnapshots)
-    .where(eq(quotaSnapshots.cpaInstanceId, instance.id))
-    .run();
-  db.update(authFiles)
-    .set({
-      available: false,
-      status: quotaPendingStatus,
-      statusMessage: quotaPendingMessage,
-    })
+  const localScopedFiles = db
+    .select()
+    .from(authFiles)
     .where(eq(authFiles.cpaInstanceId, instance.id))
-    .run();
+    .all()
+    .filter((file) =>
+      matchesAuthView(file.provider, view, {
+        treatMissingAsCodex: view === "codex",
+      }),
+    );
+
+  if (view === "codex") {
+    // Full replace for Codex snapshots so removed accounts do not linger.
+    // Grok snapshots are upserted per file below so both providers can coexist.
+    const codexFileNames = new Set(localScopedFiles.map((file) => file.fileName));
+    const existingSnapshots = db
+      .select()
+      .from(quotaSnapshots)
+      .where(eq(quotaSnapshots.cpaInstanceId, instance.id))
+      .all();
+    for (const row of existingSnapshots) {
+      if (row.authFileName && codexFileNames.has(row.authFileName)) {
+        db.delete(quotaSnapshots).where(eq(quotaSnapshots.id, row.id)).run();
+      } else if (!row.authFileName) {
+        // legacy email-only rows belong to the codex workflow
+        db.delete(quotaSnapshots).where(eq(quotaSnapshots.id, row.id)).run();
+      }
+    }
+  }
+
+  for (const file of localScopedFiles) {
+    db.update(authFiles)
+      .set({
+        available: false,
+        status: quotaPendingStatus,
+        statusMessage: quotaPendingMessage,
+      })
+      .where(eq(authFiles.id, file.id))
+      .run();
+  }
 
   for (const snapshot of snapshots) {
+    if (snapshot.authFileName) {
+      deleteQuotaSnapshotsForIdentity(instance.id, snapshot.authFileName, snapshot.email);
+    }
     const prev = carryForwardUsage(snapshot, previousUsage);
     db.insert(quotaSnapshots)
       .values({
@@ -654,6 +728,73 @@ async function syncQuotasForInstance(instance: CpaInstance, remoteFiles?: Remote
   }
 
   return snapshots.length;
+}
+
+function deleteQuotaSnapshotsForIdentity(
+  cpaInstanceId: number,
+  authFileName: string,
+  email: string | null,
+) {
+  db.delete(quotaSnapshots)
+    .where(
+      and(
+        eq(quotaSnapshots.cpaInstanceId, cpaInstanceId),
+        eq(quotaSnapshots.authFileName, authFileName),
+      ),
+    )
+    .run();
+
+  if (email) {
+    db.delete(quotaSnapshots)
+      .where(
+        and(
+          eq(quotaSnapshots.cpaInstanceId, cpaInstanceId),
+          isNull(quotaSnapshots.authFileName),
+          sql`lower(${quotaSnapshots.email}) = ${email.toLowerCase()}`,
+        ),
+      )
+      .run();
+  }
+}
+
+function applyGrokAuthAvailabilityFromRemote(
+  cpaInstanceId: number,
+  remoteFiles: RemoteAuthFile[],
+) {
+  const syncedAt = nowIso();
+  for (const remoteFile of remoteFiles) {
+    if (!matchesAuthView(remoteAuthProvider(remoteFile), "grok")) {
+      continue;
+    }
+    const fileName = remoteFile.name?.trim();
+    if (!fileName) {
+      continue;
+    }
+    const disabled = Boolean(remoteFile.disabled);
+    const unavailable = Boolean(remoteFile.unavailable);
+    const available = !disabled && !unavailable;
+    const statusMessage =
+      stringOrNull(remoteFile.status_message) ??
+      (available ? null : "不可用");
+    db.update(authFiles)
+      .set({
+        available,
+        status: disabled ? "停用" : available ? "可用" : "异常",
+        statusMessage,
+        lastSyncedAt: syncedAt,
+      })
+      .where(
+        and(
+          eq(authFiles.cpaInstanceId, cpaInstanceId),
+          eq(authFiles.fileName, fileName),
+        ),
+      )
+      .run();
+  }
+}
+
+function remoteAuthProvider(file: RemoteAuthFile) {
+  return stringOrNull(file.provider) ?? stringOrNull(file.type);
 }
 
 function recordDashboardMetricSnapshot(cpaInstanceId: number, capturedAt: string) {

@@ -13,6 +13,7 @@ import {
   type MessagePushPolicy,
 } from "@/db/schema";
 
+import { matchesAuthView } from "./auth-provider";
 import { averageAccountRemainingPercent, buildSubscriptionWeightMap } from "./quota-summary";
 import { resolveAccountQuotaStatus } from "./account-quota-status";
 import { extractSubscriptionType } from "./subscription";
@@ -200,7 +201,8 @@ function buildCpaSnapshot(cpaInstanceId: number, cpaName: string): CpaSnapshot {
     .select()
     .from(authFiles)
     .where(eq(authFiles.cpaInstanceId, cpaInstanceId))
-    .all();
+    .all()
+    .filter((file) => matchesAuthView(file.provider, "codex"));
   const quotas = db
     .select()
     .from(quotaSnapshots)

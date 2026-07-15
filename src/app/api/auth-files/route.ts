@@ -4,6 +4,13 @@ import { db } from "@/db/client";
 import { accountTags, authFiles, cpaInstances } from "@/db/schema";
 import { initRequestDb, ok, requireAuth, serverError } from "@/lib/api";
 import { accountTagLookupKeys } from "@/lib/account-tags";
+import {
+  accountTypeFromAuthPayload,
+  defaultAuthView,
+  isAuthView,
+  matchesAuthView,
+  type AuthView,
+} from "@/lib/auth-provider";
 
 export const runtime = "nodejs";
 
@@ -15,7 +22,9 @@ export async function GET(request: Request) {
     }
 
     initRequestDb();
-    const includeRawJson = new URL(request.url).searchParams.get("raw") === "1";
+    const searchParams = new URL(request.url).searchParams;
+    const includeRawJson = searchParams.get("raw") === "1";
+    const authView = parseAuthView(searchParams.get("authView"));
     const instances = db.select().from(cpaInstances).orderBy(cpaInstances.name).all();
     const tagByAccountKey = new Map(
       db.select().from(accountTags).all().map((row) => [row.accountKey, row.tag]),
@@ -28,17 +37,34 @@ export async function GET(request: Request) {
         .where(eq(authFiles.cpaInstanceId, instance.id))
         .orderBy(authFiles.fileName)
         .all()
+        .filter((row) => matchesAuthView(row.provider, authView))
         .map((row) => ({
           ...row,
           accountTag: accountTagForAuthFile(row, tagByAccountKey),
+          accountType: accountTypeFromAuthPayload(parseJson(row.rawJson)),
           proxyUrl: row.proxyUrl ?? proxyUrlFromRawAuthJson(row.rawJson),
           rawJson: includeRawJson ? row.rawJson : null,
         })),
     }));
 
-    return ok({ groups });
+    return ok({ groups, authView });
   } catch (error) {
     return serverError(error);
+  }
+}
+
+function parseAuthView(value: string | null): AuthView {
+  return isAuthView(value) ? value : defaultAuthView;
+}
+
+function parseJson(rawJson: string | null) {
+  if (!rawJson) {
+    return null;
+  }
+  try {
+    return JSON.parse(rawJson) as unknown;
+  } catch {
+    return null;
   }
 }
 

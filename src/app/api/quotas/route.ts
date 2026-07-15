@@ -1,9 +1,15 @@
 import { desc, eq } from "drizzle-orm";
 
 import { db } from "@/db/client";
-import { cpaInstances, quotaSnapshots } from "@/db/schema";
+import { authFiles, cpaInstances, quotaSnapshots } from "@/db/schema";
 import { initRequestDb, ok, requireAuth, serverError } from "@/lib/api";
 import { resolveAccountQuotaStatus } from "@/lib/account-quota-status";
+import {
+  defaultAuthView,
+  isAuthView,
+  matchesAuthView,
+  type AuthView,
+} from "@/lib/auth-provider";
 import { extractQuotaResetTimes } from "@/lib/quota-reset";
 import { extractSubscriptionType } from "@/lib/subscription";
 
@@ -17,15 +23,38 @@ export async function GET(request: Request) {
     }
 
     initRequestDb();
+    const authView = parseAuthView(
+      new URL(request.url).searchParams.get("authView"),
+    );
     const instances = db.select().from(cpaInstances).orderBy(cpaInstances.name).all();
     const groups = instances.map((instance) => {
+      const scopedFileNames = new Set(
+        db
+          .select()
+          .from(authFiles)
+          .where(eq(authFiles.cpaInstanceId, instance.id))
+          .all()
+          .filter((file) =>
+            matchesAuthView(file.provider, authView, {
+              treatMissingAsCodex: authView === "codex",
+            }),
+          )
+          .map((file) => file.fileName),
+      );
       const rows = db
         .select()
         .from(quotaSnapshots)
         .where(eq(quotaSnapshots.cpaInstanceId, instance.id))
         .orderBy(desc(quotaSnapshots.capturedAt))
         .limit(2000)
-        .all();
+        .all()
+        .filter((row) => {
+          if (row.authFileName) {
+            return scopedFileNames.has(row.authFileName);
+          }
+          // Legacy email-only rows stay available for Codex view only.
+          return authView === "codex";
+        });
 
       return {
         instance,
@@ -61,10 +90,14 @@ export async function GET(request: Request) {
       };
     });
 
-    return ok({ groups });
+    return ok({ groups, authView });
   } catch (error) {
     return serverError(error);
   }
+}
+
+function parseAuthView(value: string | null): AuthView {
+  return isAuthView(value) ? value : defaultAuthView;
 }
 
 function latestByAccount<T extends { email: string | null; authFileName: string | null }>(rows: T[]) {

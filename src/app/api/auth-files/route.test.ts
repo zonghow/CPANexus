@@ -56,6 +56,48 @@ describe("/api/auth-files", () => {
       ],
     });
   });
+
+  it("filters auth files by authView", async () => {
+    const sqlite = await setupSqlite();
+    const cpaInstanceId = insertInstance(sqlite);
+    insertAuthFile(sqlite, cpaInstanceId);
+    insertAuthFile(sqlite, cpaInstanceId, {
+      fileName: "xai-b@example.com.json",
+      email: "b@example.com",
+      provider: "xai",
+    });
+
+    const route = await import("./route");
+    const codexResponse = await route.GET(
+      new Request("http://localhost/api/auth-files?authView=codex", {
+        headers: authHeaders(),
+      }),
+    );
+    const grokResponse = await route.GET(
+      new Request("http://localhost/api/auth-files?authView=grok", {
+        headers: authHeaders(),
+      }),
+    );
+
+    expect(codexResponse.status).toBe(200);
+    expect(grokResponse.status).toBe(200);
+    await expect(codexResponse.json()).resolves.toMatchObject({
+      authView: "codex",
+      groups: [
+        {
+          authFiles: [{ email: "a@example.com", provider: "codex" }],
+        },
+      ],
+    });
+    await expect(grokResponse.json()).resolves.toMatchObject({
+      authView: "grok",
+      groups: [
+        {
+          authFiles: [{ email: "b@example.com", provider: "xai" }],
+        },
+      ],
+    });
+  });
 });
 
 async function setupSqlite() {
@@ -75,7 +117,15 @@ function insertInstance(sqlite: Database.Database) {
   return Number(result.lastInsertRowid);
 }
 
-function insertAuthFile(sqlite: Database.Database, cpaInstanceId: number) {
+function insertAuthFile(
+  sqlite: Database.Database,
+  cpaInstanceId: number,
+  overrides: {
+    fileName?: string;
+    email?: string;
+    provider?: string;
+  } = {},
+) {
   sqlite
     .prepare(`
       INSERT INTO auth_files (
@@ -88,14 +138,19 @@ function insertAuthFile(sqlite: Database.Database, cpaInstanceId: number) {
       )
       VALUES (
         @cpaInstanceId,
-        'codex-a@example.com-auto.json',
-        'a@example.com',
-        'codex',
+        @fileName,
+        @email,
+        @provider,
         'available',
         1
       )
     `)
-    .run({ cpaInstanceId });
+    .run({
+      cpaInstanceId,
+      fileName: overrides.fileName ?? "codex-a@example.com-auto.json",
+      email: overrides.email ?? "a@example.com",
+      provider: overrides.provider ?? "codex",
+    });
 }
 
 function authHeaders() {

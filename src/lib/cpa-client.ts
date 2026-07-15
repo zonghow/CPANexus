@@ -1,6 +1,17 @@
 import type { CpaInstance } from "@/db/schema";
 
+import { matchesAuthView } from "./auth-provider";
 import { normalizeQuotaPayload, type NormalizedQuotaSnapshot } from "./quota";
+import {
+  buildXaiBillingSummary,
+  buildXaiRequestHeaders,
+  mergeXaiBillingSummaries,
+  parseXaiBillingPayload,
+  xaiBillingMonthlyUrl,
+  xaiBillingToQuotaPercents,
+  xaiBillingWeeklyUrl,
+  type XaiBillingSummary,
+} from "./xai-quota";
 
 export type CpaConnection = Pick<
   CpaInstance,
@@ -192,6 +203,30 @@ export async function refreshRemoteQuotas(
   return normalizeQuotaPayload(payload);
 }
 
+export async function refreshRemoteXaiQuotas(
+  instance: CpaConnection,
+  remoteAuthFiles?: RemoteAuthFile[],
+): Promise<NormalizedQuotaSnapshot[]> {
+  const files = remoteAuthFiles ?? (await listRemoteAuthFiles(instance));
+  const xaiFiles = files.filter((file) =>
+    matchesAuthView(stringOrNull(file.provider) ?? stringOrNull(file.type), "grok", {
+      treatMissingAsCodex: false,
+    }),
+  );
+
+  const batches: NormalizedQuotaSnapshot[][] = [];
+  for (let index = 0; index < xaiFiles.length; index += quotaProbeConcurrency) {
+    const batch = xaiFiles.slice(index, index + quotaProbeConcurrency);
+    batches.push(
+      ...(await Promise.all(
+        batch.map((file) => probeXaiBillingUsage(instance, file)),
+      )),
+    );
+  }
+
+  return batches.flat();
+}
+
 async function refreshCodexWhamQuotas(
   instance: CpaConnection,
   remoteAuthFiles: RemoteAuthFile[],
@@ -285,6 +320,111 @@ async function probeCodexWhamUsage(
       ),
     ];
   }
+}
+
+async function probeXaiBillingUsage(
+  instance: CpaConnection,
+  authFile: RemoteAuthFile,
+): Promise<NormalizedQuotaSnapshot[]> {
+  const authIndex = stringOrNull(authFile.auth_index);
+  if (!authIndex) {
+    return [
+      quotaProbeFailure(authFile, "Grok 账号缺少 auth_index，无法查询额度", null),
+    ];
+  }
+
+  try {
+    const header = buildXaiRequestHeaders(authFile as Record<string, unknown>);
+    const [weeklyResult, monthlyResult] = await Promise.allSettled([
+      requestXaiBilling(instance, authIndex, xaiBillingWeeklyUrl, header),
+      requestXaiBilling(instance, authIndex, xaiBillingMonthlyUrl, header),
+    ]);
+
+    const weeklySummary =
+      weeklyResult.status === "fulfilled" ? weeklyResult.value : null;
+    const monthlySummary =
+      monthlyResult.status === "fulfilled" ? monthlyResult.value : null;
+    const summary = mergeXaiBillingSummaries(weeklySummary, monthlySummary);
+
+    if (!summary) {
+      if (
+        weeklyResult.status === "rejected" &&
+        monthlyResult.status === "rejected"
+      ) {
+        throw weeklyResult.reason;
+      }
+      return [
+        quotaProbeFailure(authFile, "Grok billing 未返回可用额度数据", {
+          weekly: weeklySummary,
+          monthly: monthlySummary,
+        }),
+      ];
+    }
+
+    const percents = xaiBillingToQuotaPercents(summary);
+    return [
+      {
+        email: stringOrNull(authFile.email),
+        authFileName: stringOrNull(authFile.name),
+        usage5hPercent: percents.usage5hPercent,
+        usageWeekPercent: percents.usageWeekPercent,
+        available: percents.available,
+        exception: percents.available ? null : "额度已用尽",
+        raw: {
+          provider: "xai",
+          plan: percents.planLabel,
+          billing: summary,
+        },
+      },
+    ];
+  } catch (error) {
+    return [
+      quotaProbeFailure(
+        authFile,
+        error instanceof Error ? error.message : String(error),
+        null,
+      ),
+    ];
+  }
+}
+
+async function requestXaiBilling(
+  instance: CpaConnection,
+  authIndex: string,
+  url: string,
+  header: Record<string, string>,
+): Promise<XaiBillingSummary | null> {
+  const response = await cpaFetchJson<{
+    status_code?: number;
+    body?: string;
+  }>(instance, "/v0/management/api-call", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      auth_index: authIndex,
+      method: "GET",
+      url,
+      header,
+    }),
+  });
+
+  const upstreamStatus = response.status_code ?? 0;
+  const body = parseJson(response.body ?? "");
+  if (upstreamStatus < 200 || upstreamStatus >= 300) {
+    throw new Error(
+      `Grok billing ${upstreamStatus || "error"}: ${extractErrorMessage(body)}`,
+    );
+  }
+
+  const payload = parseXaiBillingPayload(body);
+  const config = isRecord(payload?.config)
+    ? (payload?.config as Record<string, unknown>)
+    : isRecord(payload)
+      ? (payload as Record<string, unknown>)
+      : null;
+  return buildXaiBillingSummary(config);
 }
 
 async function cpaFetchJson<T = unknown>(

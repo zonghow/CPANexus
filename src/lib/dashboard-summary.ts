@@ -1,3 +1,5 @@
+import { matchesAuthView } from "./auth-provider";
+
 type CpaInstanceLike = {
   id: number;
   enabled: boolean;
@@ -6,6 +8,7 @@ type CpaInstanceLike = {
 type AuthFileLike = {
   cpaInstanceId: number;
   available: boolean;
+  provider?: string | null;
 };
 
 type QuotaSnapshotLike = {
@@ -48,8 +51,10 @@ export function summarizeDashboardStats(input: {
       .map((instance) => instance.id),
   );
 
-  const enabledAuthFiles = input.authFiles.filter((authFile) =>
-    enabledInstanceIds.has(authFile.cpaInstanceId),
+  const enabledAuthFiles = input.authFiles.filter(
+    (authFile) =>
+      enabledInstanceIds.has(authFile.cpaInstanceId) &&
+      matchesAuthView(authFile.provider, "codex"),
   );
   const enabledProxyIds = new Set(
     input.proxyCpaInstances

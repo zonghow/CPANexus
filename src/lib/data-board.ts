@@ -1,3 +1,5 @@
+import { matchesAuthView } from "./auth-provider";
+
 type CpaInstanceLike = {
   id: number;
   name: string;
@@ -7,6 +9,7 @@ type CpaInstanceLike = {
 type AuthFileLike = {
   cpaInstanceId: number;
   available: boolean;
+  provider?: string | null;
 };
 
 type QuotaSnapshotLike = {
@@ -63,8 +66,10 @@ export function summarizeDataBoard(
 ): DataBoardStats {
   const scopeIds = enabledScopeIds(input.cpaInstances, selectedCpaInstanceIds);
   const scopeSet = new Set(scopeIds);
-  const scopedAuthFiles = input.authFiles.filter((authFile) =>
-    scopeSet.has(authFile.cpaInstanceId),
+  const scopedAuthFiles = input.authFiles.filter(
+    (authFile) =>
+      scopeSet.has(authFile.cpaInstanceId) &&
+      matchesAuthView(authFile.provider, "codex"),
   );
   const enabledProxyIds = new Set(input.proxies.filter((proxy) => proxy.enabled).map((proxy) => proxy.id));
   const scopedProxyIds = new Set(

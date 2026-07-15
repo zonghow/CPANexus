@@ -68,6 +68,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { DataBoardSection } from "@/components/data-board-section";
 import { MessagePushSection } from "@/components/message-push-section";
@@ -81,6 +82,15 @@ import {
   resolveAccountQuotaStatus,
   type AccountQuotaState,
 } from "@/lib/account-quota-status";
+import {
+  authViewLabels,
+  authViewStorageKey,
+  authViews,
+  defaultAuthView,
+  isAuthView,
+  sectionAllowedForAuthView,
+  type AuthView,
+} from "@/lib/auth-provider";
 import { selectAvailableAuthFileIds } from "@/lib/auth-exchange-selection";
 import { sortAccountRows } from "@/lib/account-sort";
 import { buildAutoAuthFileName } from "@/lib/codex-auth";
@@ -134,6 +144,7 @@ type AuthFile = {
   disabled: boolean;
   available: boolean;
   accountTag: string | null;
+  accountType?: string | null;
   proxyUrl: string | null;
   rawJson: string | null;
   createdAt: string;
@@ -326,7 +337,7 @@ type CpaJsonUploadResult = {
 type CpaJsonUploadSource = "session-json";
 type CandidateQuotaRefreshMode = "withRt" | "withoutRt";
 
-const navItems = [
+const authNavItems = [
   { id: "auth", label: "账号管理", icon: FileKey2, href: "/auth" },
   {
     id: "candidate-pool",
@@ -336,12 +347,17 @@ const navItems = [
   },
   { id: "exceptions", label: "异常账号", icon: ArchiveX, href: "/exceptions" },
   { id: "dashboard", label: "数据看板", icon: BarChart3, href: "/dashboard" },
-  { id: "instances", label: "CPA管理", icon: Server, href: "/instances" },
-  { id: "proxies", label: "代理管理", icon: Network, href: "/proxies" },
   { id: "message-push", label: "消息推送", icon: Bell, href: "/message-push" },
   { id: "quota-settings", label: "额度设置", icon: Wallet, href: "/quota-settings" },
+] as const;
+
+const sharedNavItems = [
+  { id: "instances", label: "CPA管理", icon: Server, href: "/instances" },
+  { id: "proxies", label: "代理管理", icon: Network, href: "/proxies" },
   { id: "jobs", label: "定时任务", icon: Activity, href: "/jobs" },
 ] as const;
+
+const navItems = [...authNavItems, ...sharedNavItems] as const;
 
 export type SectionId = (typeof navItems)[number]["id"];
 
@@ -417,6 +433,8 @@ export function CpaDashboard({
 }) {
   const [clientSection, setClientSection] = useState<SectionId>(section);
   const activeSection = clientSection;
+  const [authView, setAuthView] = useState<AuthView>(defaultAuthView);
+  const [authViewReady, setAuthViewReady] = useState(false);
   const [instances, setInstances] = useState<CpaInstance[]>([]);
   const [authGroups, setAuthGroups] = useState<
     Array<{ instance: CpaInstance; authFiles: AuthFile[] }>
@@ -511,6 +529,31 @@ export function CpaDashboard({
     </div>
   );
 
+  const renderNavLink = (
+    item: (typeof navItems)[number],
+    collapsed: boolean,
+  ) => {
+    const Icon = item.icon;
+    return (
+      <a
+        key={item.id}
+        href={item.href}
+        title={collapsed ? item.label : undefined}
+        onClick={(event) => navigateSection(event, item.id, item.href)}
+        className={cn(
+          "flex h-8 min-w-max items-center gap-1.5 rounded-md px-1.5 text-[12.5px] transition-colors",
+          collapsed && "lg:min-w-0 lg:justify-center lg:px-0",
+          activeSection === item.id
+            ? "bg-sidebar-accent text-sidebar-accent-foreground"
+            : "text-muted-foreground hover:bg-sidebar-accent/70 hover:text-foreground",
+        )}
+      >
+        <Icon className="h-3.5 w-3.5 shrink-0" />
+        <span className={cn(collapsed && "lg:hidden")}>{item.label}</span>
+      </a>
+    );
+  };
+
   const renderSidebarInner = (collapsed: boolean) => (
     <div className="flex h-full flex-col">
       <div className="flex min-h-14 items-center gap-2 border-b px-2 py-2.5">
@@ -534,28 +577,64 @@ export function CpaDashboard({
           <SidebarModeMenu mode={sidebar.mode} onSelect={sidebar.setMode} />
         </div>
       </div>
-      <nav className="flex gap-1 overflow-x-auto p-1 lg:flex-col lg:overflow-visible">
-        {navItems.map((item) => {
-          const Icon = item.icon;
-          return (
-            <a
-              key={item.id}
-              href={item.href}
-              title={collapsed ? item.label : undefined}
-              onClick={(event) => navigateSection(event, item.id, item.href)}
+      <div className={cn("border-b p-1", collapsed && "lg:px-1")}>
+        <Tabs
+          value={authView}
+          onValueChange={(value) => {
+            if (isAuthView(value)) {
+              switchAuthView(value);
+            }
+          }}
+        >
+          <TabsList
+            className={cn(
+              "grid w-full grid-cols-2",
+              collapsed && "lg:grid-cols-1 lg:h-auto",
+            )}
+          >
+            {authViews.map((view) => (
+              <TabsTrigger
+                key={view}
+                value={view}
+                className={cn(collapsed && "lg:px-1 lg:text-[11px]")}
+                title={authViewLabels[view]}
+              >
+                {collapsed ? (
+                  <span className="lg:hidden">{authViewLabels[view]}</span>
+                ) : null}
+                <span className={cn(collapsed && "hidden lg:inline")}>
+                  {collapsed ? authViewLabels[view].slice(0, 1) : authViewLabels[view]}
+                </span>
+              </TabsTrigger>
+            ))}
+          </TabsList>
+        </Tabs>
+      </div>
+      <nav className="flex min-h-0 flex-1 flex-col">
+        <div className="flex gap-1 overflow-x-auto p-1 lg:flex-col lg:overflow-y-auto">
+          <div
+            className={cn(
+              "px-1.5 pb-0.5 pt-1 text-[10px] font-medium tracking-wide text-muted-foreground/80 uppercase",
+              collapsed && "lg:hidden",
+            )}
+          >
+            {authViewLabels[authView]}
+          </div>
+          {visibleAuthNavItems.map((item) => renderNavLink(item, collapsed))}
+        </div>
+        <div className="mt-auto border-t">
+          <div className="flex gap-1 overflow-x-auto p-1 lg:flex-col lg:overflow-visible">
+            <div
               className={cn(
-                "flex h-8 min-w-max items-center gap-1.5 rounded-md px-1.5 text-[12.5px] transition-colors",
-                collapsed && "lg:min-w-0 lg:justify-center lg:px-0",
-                activeSection === item.id
-                  ? "bg-sidebar-accent text-sidebar-accent-foreground"
-                  : "text-muted-foreground hover:bg-sidebar-accent/70 hover:text-foreground",
+                "px-1.5 pb-0.5 pt-1 text-[10px] font-medium tracking-wide text-muted-foreground/80 uppercase",
+                collapsed && "lg:hidden",
               )}
             >
-              <Icon className="h-3.5 w-3.5 shrink-0" />
-              <span className={cn(collapsed && "lg:hidden")}>{item.label}</span>
-            </a>
-          );
-        })}
+              公共
+            </div>
+            {sharedNavItems.map((item) => renderNavLink(item, collapsed))}
+          </div>
+        </div>
       </nav>
     </div>
   );
@@ -568,6 +647,62 @@ export function CpaDashboard({
     window.addEventListener("popstate", handlePopState);
     return () => window.removeEventListener("popstate", handlePopState);
   }, [section]);
+
+  useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem(authViewStorageKey);
+      if (isAuthView(stored)) {
+        setAuthView(stored);
+      }
+    } catch {
+      // ignore storage failures
+    }
+    setAuthViewReady(true);
+  }, []);
+
+  useEffect(() => {
+    if (!authViewReady) {
+      return;
+    }
+    try {
+      window.localStorage.setItem(authViewStorageKey, authView);
+    } catch {
+      // ignore storage failures
+    }
+  }, [authView, authViewReady]);
+
+  useEffect(() => {
+    if (!authViewReady) {
+      return;
+    }
+    if (!sectionAllowedForAuthView(activeSection, authView)) {
+      setClientSection("auth");
+      if (window.location.pathname !== "/auth") {
+        window.history.replaceState({ section: "auth" }, "", "/auth");
+      }
+    }
+  }, [activeSection, authView, authViewReady]);
+
+  const visibleAuthNavItems = useMemo(
+    () =>
+      authNavItems.filter((item) =>
+        sectionAllowedForAuthView(item.id, authView),
+      ),
+    [authView],
+  );
+
+  function switchAuthView(nextView: AuthView) {
+    if (nextView === authView) {
+      return;
+    }
+    setAuthView(nextView);
+    if (!sectionAllowedForAuthView(activeSection, nextView)) {
+      setClientSection("auth");
+      if (window.location.pathname !== "/auth") {
+        window.history.replaceState({ section: "auth" }, "", "/auth");
+      }
+    }
+  }
 
   function navigateSection(
     event: MouseEvent<HTMLAnchorElement>,
@@ -585,6 +720,9 @@ export function CpaDashboard({
     }
 
     event.preventDefault();
+    if (!sectionAllowedForAuthView(targetSection, authView)) {
+      return;
+    }
     if (targetSection !== activeSection) {
       setClientSection(targetSection);
       window.scrollTo({ top: 0 });
@@ -727,10 +865,13 @@ export function CpaDashboard({
       try {
         const targetSection = options.section ?? activeSection;
         const needsAuthFiles = targetSection === "auth";
-        const needsCandidatePool = targetSection === "candidate-pool";
-        const needsExceptions = targetSection === "exceptions";
+        const needsCandidatePool =
+          authView === "codex" && targetSection === "candidate-pool";
+        const needsExceptions =
+          authView === "codex" && targetSection === "exceptions";
         const needsProxies =
-          targetSection === "auth" || targetSection === "proxies";
+          targetSection === "proxies" ||
+          (authView === "codex" && targetSection === "auth");
         const requestedRunsPage =
           options.runsPage ?? runsPaginationRef.current.page;
         const requestedRunsPageSize =
@@ -756,7 +897,7 @@ export function CpaDashboard({
                   instance: CpaInstance;
                   authFiles: AuthFile[];
                 }>;
-              }>("/api/auth-files")
+              }>(`/api/auth-files?authView=${encodeURIComponent(authView)}`)
             : Promise.resolve(null),
           needsCandidatePool
             ? fetchJson<{ authFiles: CandidateAuthFile[] }>(
@@ -774,14 +915,14 @@ export function CpaDashboard({
                   instance: CpaInstance;
                   quotas: QuotaSnapshot[];
                 }>;
-              }>("/api/quotas")
+              }>(`/api/quotas?authView=${encodeURIComponent(authView)}`)
             : Promise.resolve(null),
           needsProxies
             ? fetchJson<{ proxies: ProxyRow[]; instances: CpaInstance[] }>(
                 "/api/proxies",
               )
             : Promise.resolve(null),
-          needsAuthFiles
+          needsAuthFiles && authView === "codex"
             ? fetchJson<{ quotas: SubscriptionQuotaSetting[] }>(
                 "/api/subscription-quotas",
               )
@@ -803,6 +944,9 @@ export function CpaDashboard({
         if (quotaRes) {
           setQuotaGroups(quotaRes.groups);
         }
+        if (needsAuthFiles && authView !== "codex") {
+          setSubscriptionQuotas([]);
+        }
         if (proxyRes) {
           setProxies(proxyRes.proxies);
         }
@@ -815,16 +959,19 @@ export function CpaDashboard({
         toast.error(error instanceof Error ? error.message : String(error));
       }
     },
-    [activeSection, applyJobsResponse],
+    [activeSection, applyJobsResponse, authView],
   );
 
   useEffect(() => {
+    if (!authViewReady) {
+      return;
+    }
     const timer = window.setTimeout(() => {
       void loadAll();
     }, 0);
 
     return () => window.clearTimeout(timer);
-  }, [loadAll]);
+  }, [authViewReady, loadAll]);
 
   useEffect(() => {
     let stopped = false;
@@ -1864,7 +2011,7 @@ export function CpaDashboard({
               />
             ) : null}
 
-            {activeSection === "auth" ? (
+            {activeSection === "auth" && authView === "codex" ? (
               <AuthFilesSection
                 groups={authGroups}
                 quotaGroups={quotaGroups}
@@ -1892,6 +2039,18 @@ export function CpaDashboard({
                 onRefreshCpa={refreshCpaInstance}
                 onStartCodexOAuth={startCodexOAuthLogin}
                 onSubmitCodexOAuthCallback={submitCodexOAuthCallback}
+              />
+            ) : null}
+
+            {activeSection === "auth" && authView === "grok" ? (
+              <GrokAuthFilesSection
+                groups={authGroups}
+                quotaGroups={quotaGroups}
+                updatingCpaIds={effectiveUpdatingCpaIds}
+                syncingCpaIds={effectiveSyncingCpaIds}
+                syncingCpaPhases={effectiveSyncingCpaPhases}
+                nowMs={nowMs}
+                onRefreshCpa={refreshCpaInstance}
               />
             ) : null}
 
@@ -2233,6 +2392,386 @@ type SessionJsonDialogState = {
   stage: "input" | "uploading";
   error: string | null;
 };
+
+function GrokAuthFilesSection({
+  groups,
+  quotaGroups,
+  updatingCpaIds,
+  syncingCpaIds,
+  syncingCpaPhases,
+  nowMs,
+  onRefreshCpa,
+}: {
+  groups: Array<{ instance: CpaInstance; authFiles: AuthFile[] }>;
+  quotaGroups: Array<{ instance: CpaInstance; quotas: QuotaSnapshot[] }>;
+  updatingCpaIds: Set<number>;
+  syncingCpaIds: Set<number>;
+  syncingCpaPhases: Map<number, CpaBusyPhase>;
+  nowMs: number;
+  onRefreshCpa: (cpaInstanceId: number) => Promise<void>;
+}) {
+  const enabledGroups = onlyEnabledCpaGroups(groups);
+  const [useDesktopMasonry, setUseDesktopMasonry] = useState(false);
+
+  useEffect(() => {
+    const mediaQuery = window.matchMedia("(min-width: 1280px)");
+    const sync = () => setUseDesktopMasonry(mediaQuery.matches);
+    sync();
+    mediaQuery.addEventListener("change", sync);
+    return () => mediaQuery.removeEventListener("change", sync);
+  }, []);
+
+  const groupColumns = useMemo(() => {
+    if (!useDesktopMasonry || enabledGroups.length <= 1) {
+      return [enabledGroups];
+    }
+    return distributeCpaGroups(enabledGroups);
+  }, [enabledGroups, useDesktopMasonry]);
+
+  function renderGroupCard(group: {
+    instance: CpaInstance;
+    authFiles: AuthFile[];
+  }) {
+    const quotaGroup = quotaGroups.find(
+      (item) => item.instance.id === group.instance.id,
+    );
+    const rows = mergeGrokAuthFilesWithQuotas(
+      group.authFiles,
+      quotaGroup?.quotas ?? [],
+    );
+    const activeRows = rows.filter((row) => !row.disabled);
+    const availableCount = activeRows.filter((row) => row.available).length;
+    const disabledCount = rows.filter((row) => row.disabled).length;
+    const exceptionCount = activeRows.filter((row) => !row.available).length;
+    const averageWeekRemaining = averageAccountRemainingPercent(
+      activeRows.map((row) => ({
+        ...row,
+        subscriptionType: row.planLabel,
+        quotaStatus: row.available ? "available" : "exception",
+      })),
+      "usageWeekPercent",
+    );
+    const averageMonthRemaining = averageAccountRemainingPercent(
+      activeRows.map((row) => ({
+        ...row,
+        subscriptionType: row.planLabel,
+        quotaStatus: row.available ? "available" : "exception",
+      })),
+      "usage5hPercent",
+    );
+    const isUpdating = updatingCpaIds.has(group.instance.id);
+    const isSyncing = syncingCpaIds.has(group.instance.id) || isUpdating;
+    const syncingLabel = isSyncing
+      ? cpaBusyPhaseLabel(syncingCpaPhases.get(group.instance.id))
+      : null;
+
+    return (
+      <div
+        key={group.instance.id}
+        aria-busy={isUpdating}
+        className="relative min-w-0 overflow-hidden rounded-md border bg-card [contain-intrinsic-size:320px] [content-visibility:auto]"
+      >
+        <div className="space-y-2 border-b bg-muted/35 px-3 py-2">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <a
+              href={buildCpaManagementHref(group.instance.baseUrl)}
+              target="_blank"
+              rel="noreferrer"
+              className="truncate text-sm font-semibold hover:text-primary hover:underline"
+            >
+              {group.instance.name}
+            </a>
+            <Badge variant="secondary">{rows.length}</Badge>
+            <Button
+              type="button"
+              size="icon-xs"
+              variant="ghost"
+              aria-label={`刷新 ${group.instance.name}`}
+              title="刷新"
+              disabled={isSyncing}
+              onClick={() => void onRefreshCpa(group.instance.id)}
+            >
+              <RefreshCw
+                className={cn("h-3.5 w-3.5", isSyncing && "animate-spin")}
+              />
+            </Button>
+            {syncingLabel ? (
+              <span className="text-[11px] text-muted-foreground">
+                {syncingLabel}
+              </span>
+            ) : null}
+          </div>
+          <div className="flex w-full flex-wrap items-center gap-x-2 gap-y-1 border-t border-border/50 pt-1.5 text-xs text-muted-foreground">
+            <HeaderAverageMeter label="周" value={averageWeekRemaining} />
+            <HeaderAverageMeter label="月" value={averageMonthRemaining} />
+            <span className="text-emerald-700">{availableCount} 可用</span>
+            {disabledCount > 0 ? <span>{disabledCount} 停用</span> : null}
+            {exceptionCount > 0 ? (
+              <span className="text-rose-700">{exceptionCount} 异常</span>
+            ) : null}
+          </div>
+        </div>
+        <GrokAuthFileTable rows={rows} nowMs={nowMs} />
+        {isUpdating ? (
+          <div className="absolute inset-0 z-40 flex items-center justify-center bg-background/70 backdrop-blur-[1px]">
+            <div className="flex items-center gap-2 rounded-md border bg-card px-3 py-2 text-sm font-medium shadow-sm">
+              <Loader2 className="h-4 w-4 animate-spin text-primary" />
+              正在更新
+            </div>
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+
+  if (enabledGroups.length === 0) {
+    return (
+      <div className="rounded-md border bg-card px-4 py-10 text-center text-sm text-muted-foreground">
+        暂无启用的 CPA 实例
+      </div>
+    );
+  }
+
+  return (
+    <section
+      className={cn(
+        groupColumns.length > 1 ? "grid grid-cols-2 gap-3" : "space-y-3",
+      )}
+    >
+      {groupColumns.length === 1
+        ? groupColumns[0].map(renderGroupCard)
+        : groupColumns.map((column, columnIndex) => (
+            <div key={columnIndex} className="space-y-3">
+              {column.map(renderGroupCard)}
+            </div>
+          ))}
+    </section>
+  );
+}
+
+type GrokAuthFileRow = {
+  id: number;
+  email: string | null;
+  fileName: string;
+  accountType: string | null;
+  planLabel: string | null;
+  provider: string | null;
+  disabled: boolean;
+  available: boolean;
+  statusLabel: string;
+  usageWeekPercent: number | null;
+  usage5hPercent: number | null;
+  usageWeekStale: boolean;
+  usage5hStale: boolean;
+  proxyUrl: string | null;
+  refreshedAt: string;
+};
+
+function mergeGrokAuthFilesWithQuotas(
+  authFileRows: AuthFile[],
+  quotas: QuotaSnapshot[],
+): GrokAuthFileRow[] {
+  const quotaByFileName = new Map<string, QuotaSnapshot>();
+  for (const quota of quotas) {
+    if (quota.authFileName) {
+      quotaByFileName.set(quota.authFileName, quota);
+    }
+  }
+
+  return authFileRows.map((file) => {
+    const quota = quotaByFileName.get(file.fileName) ?? null;
+    const planLabel = quota?.subscriptionType ?? null;
+    const accountType =
+      file.accountType ??
+      (file.provider ? String(file.provider) : null);
+    const available = file.disabled
+      ? false
+      : (quota?.available ?? file.available);
+    let statusLabel = "可用";
+    if (file.disabled) {
+      statusLabel = "停用";
+    } else if (!available) {
+      statusLabel =
+        quota?.exception?.trim() ||
+        file.statusMessage?.trim() ||
+        file.status ||
+        "异常";
+    } else if (planLabel) {
+      statusLabel = planLabel;
+    } else if (file.status?.trim()) {
+      statusLabel = file.status;
+    }
+
+    return {
+      id: file.id,
+      email: quota?.email ?? file.email,
+      fileName: file.fileName,
+      accountType,
+      planLabel,
+      provider: file.provider,
+      disabled: file.disabled,
+      available,
+      statusLabel,
+      usageWeekPercent: quota?.usageWeekPercent ?? null,
+      usage5hPercent: quota?.usage5hPercent ?? null,
+      usageWeekStale: quota?.usageWeekStale ?? false,
+      usage5hStale: quota?.usage5hStale ?? false,
+      proxyUrl: file.proxyUrl,
+      refreshedAt: quota?.capturedAt ?? file.lastSyncedAt,
+    };
+  });
+}
+
+function GrokAuthFileTable({
+  rows,
+  nowMs,
+}: {
+  rows: GrokAuthFileRow[];
+  nowMs: number;
+}) {
+  return (
+    <div className="overflow-x-auto">
+      <div className="max-h-[35.75rem] min-w-[680px] max-w-none overflow-y-auto">
+        <table className="w-full min-w-[680px] table-fixed caption-bottom text-sm">
+          <colgroup>
+            <col />
+            <col style={{ width: 96 }} />
+            <col style={{ width: 96 }} />
+            <col style={{ width: 80 }} />
+            <col style={{ width: 72 }} />
+            <col style={{ width: 80 }} />
+          </colgroup>
+          <TableHeader>
+            <TableRow className="h-8">
+              <TableHead className="sticky top-0 z-10 bg-card px-3 py-1 text-xs shadow-[0_1px_0_var(--border)]">
+                账号
+              </TableHead>
+              <TableHead className="sticky top-0 z-10 w-24 bg-card px-2 py-1 text-xs shadow-[0_1px_0_var(--border)]">
+                <CompactPercentHeader windowLabel="周" />
+              </TableHead>
+              <TableHead className="sticky top-0 z-10 w-24 bg-card px-2 py-1 text-xs shadow-[0_1px_0_var(--border)]">
+                <CompactPercentHeader windowLabel="月" />
+              </TableHead>
+              <TableHead className="sticky top-0 z-10 w-20 bg-card px-2 py-1 text-xs shadow-[0_1px_0_var(--border)]">
+                类型
+              </TableHead>
+              <TableHead className="sticky top-0 z-10 w-18 bg-card px-2 py-1 text-xs shadow-[0_1px_0_var(--border)]">
+                状态
+              </TableHead>
+              <TableHead className="sticky top-0 z-10 w-20 bg-card px-2 py-1 text-xs shadow-[0_1px_0_var(--border)]">
+                刷新
+              </TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {rows.length === 0 ? (
+              <TableRow>
+                <TableCell
+                  colSpan={6}
+                  className="h-16 text-center text-sm text-muted-foreground"
+                >
+                  暂无 Grok 账号
+                </TableCell>
+              </TableRow>
+            ) : (
+              rows.map((row) => (
+                <TableRow
+                  key={row.id}
+                  className={cn(
+                    "h-9",
+                    row.disabled && "bg-muted/30 text-muted-foreground",
+                  )}
+                >
+                  <TableCell className="px-3 py-1">
+                    <div className="flex min-w-0 items-center gap-2">
+                      <span
+                        className={cn(
+                          "h-2 w-2 shrink-0 rounded-full",
+                          row.disabled
+                            ? "bg-muted-foreground/50"
+                            : row.available
+                              ? "bg-emerald-500"
+                              : "bg-rose-500",
+                        )}
+                      />
+                      {row.planLabel ? (
+                        <SubscriptionBadge
+                          value={row.planLabel}
+                          formatValue={false}
+                          className="max-w-24 truncate normal-case"
+                          title={row.planLabel}
+                        />
+                      ) : null}
+                      <span className="min-w-0 flex-1 truncate text-xs font-medium">
+                        {row.email ?? row.fileName}
+                      </span>
+                    </div>
+                  </TableCell>
+                  <TableCell className="w-24 px-2 py-1">
+                    <CompactPercentBar
+                      value={row.usageWeekPercent}
+                      resetAt={null}
+                      nowMs={nowMs}
+                      stale={row.usageWeekStale}
+                    />
+                  </TableCell>
+                  <TableCell className="w-24 px-2 py-1">
+                    <CompactPercentBar
+                      value={row.usage5hPercent}
+                      resetAt={null}
+                      nowMs={nowMs}
+                      stale={row.usage5hStale}
+                    />
+                  </TableCell>
+                  <TableCell className="px-2 py-1">
+                    <span className="block truncate text-xs text-muted-foreground">
+                      {formatGrokAccountType(row.accountType)}
+                    </span>
+                  </TableCell>
+                  <TableCell className="px-2 py-1">
+                    <span
+                      title={row.statusLabel}
+                      className={cn(
+                        "block truncate text-xs",
+                        !row.disabled && !row.available
+                          ? "text-rose-700"
+                          : "text-muted-foreground",
+                      )}
+                    >
+                      {row.statusLabel}
+                    </span>
+                  </TableCell>
+                  <TableCell className="whitespace-nowrap px-2 py-1 text-xs text-muted-foreground">
+                    <span title={formatDate(row.refreshedAt)}>
+                      {formatRelativeTime(row.refreshedAt, nowMs)}
+                    </span>
+                  </TableCell>
+                </TableRow>
+              ))
+            )}
+          </TableBody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function formatGrokAccountType(value: string | null) {
+  if (!value) {
+    return "-";
+  }
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "oauth") {
+    return "OAuth";
+  }
+  if (normalized === "api_key" || normalized === "apikey") {
+    return "API Key";
+  }
+  if (normalized === "xai" || normalized === "grok") {
+    return "Grok";
+  }
+  return value;
+}
 
 function AuthFilesSection({
   groups,
@@ -7006,14 +7545,16 @@ function CompactPercentBar({
 }) {
   const remaining =
     value === null ? null : Math.max(0, Math.min(100, 100 - value));
-  const width = remaining ?? 0;
-  const tone = quotaRemainingTone(remaining);
+  const displayRemaining =
+    remaining === null ? null : Math.round(remaining * 100) / 100;
+  const width = displayRemaining ?? 0;
+  const tone = quotaRemainingTone(displayRemaining);
   const resetLabel = formatQuotaResetCountdown(resetAt, nowMs);
-  const isStale = stale && remaining !== null;
+  const isStale = stale && displayRemaining !== null;
 
   const dollarLine =
-    quotaDollars != null && remaining != null
-      ? `剩余 ${formatDollars((quotaDollars * remaining) / 100)} / ${formatDollars(quotaDollars)}`
+    quotaDollars != null && displayRemaining != null
+      ? `剩余 ${formatDollars((quotaDollars * displayRemaining) / 100)} / ${formatDollars(quotaDollars)}`
       : null;
   const staleLine = isStale ? "刷新失败，显示上次数据" : null;
   const resetLine = quotaResetTitle(resetAt);
@@ -7034,7 +7575,9 @@ function CompactPercentBar({
       </span>
       <span className="flex items-center justify-between gap-2 leading-none">
         <span className={cn("text-[11px] tabular-nums", tone.text)}>
-          {remaining === null ? "-" : `${isStale ? "~" : ""}${remaining}%`}
+          {displayRemaining === null
+            ? "-"
+            : `${isStale ? "~" : ""}${formatPercent(displayRemaining)}`}
         </span>
         <span className="text-right text-[10px] text-muted-foreground tabular-nums">
           {resetLabel ?? "-"}
@@ -8042,7 +8585,15 @@ function formatCountdown(seconds: number) {
 }
 
 function formatPercent(value: number | null) {
-  return value === null ? "-" : `${value}%`;
+  if (value === null || !Number.isFinite(value)) {
+    return "-";
+  }
+  // Prefer whole percents; fall back to 1 decimal only when needed.
+  const rounded = Math.round(value * 10) / 10;
+  if (Number.isInteger(rounded) || Math.abs(rounded - Math.round(rounded)) < 0.05) {
+    return `${Math.round(rounded)}%`;
+  }
+  return `${rounded.toFixed(1)}%`;
 }
 
 function formatDollars(value: number) {
