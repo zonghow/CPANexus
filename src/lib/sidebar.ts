@@ -14,10 +14,10 @@ export const sidebarModeDescriptions: Record<SidebarMode, string> = {
   auto: "悬停左侧边缘时弹出",
 };
 
-// Width bounds (px) for the expanded sidebar. Standard baseline is 132px.
-export const SIDEBAR_MIN_WIDTH = 104;
+// Width bounds (px) for the expanded sidebar. Standard baseline is 160px.
+export const SIDEBAR_MIN_WIDTH = 160;
 export const SIDEBAR_MAX_WIDTH = 360;
-export const SIDEBAR_DEFAULT_WIDTH = 132;
+export const SIDEBAR_DEFAULT_WIDTH = 160;
 // Fixed width used when the sidebar is collapsed to icons only.
 export const SIDEBAR_COLLAPSED_WIDTH = 56;
 

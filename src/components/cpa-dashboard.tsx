@@ -556,7 +556,14 @@ export function CpaDashboard({
 
   const renderSidebarInner = (collapsed: boolean) => (
     <div className="flex h-full flex-col">
-      <div className="flex min-h-14 items-center gap-2 border-b px-2 py-2.5">
+      <div
+        className={cn(
+          "flex border-b px-2 py-2.5",
+          collapsed
+            ? "min-h-0 flex-col items-center gap-1.5"
+            : "min-h-14 items-center gap-2",
+        )}
+      >
         <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-primary text-primary-foreground">
           <Network className="h-3.5 w-3.5" />
         </div>
@@ -570,8 +577,8 @@ export function CpaDashboard({
         </div>
         <div
           className={cn(
-            "ml-auto shrink-0",
-            collapsed && "lg:ml-0 lg:w-full lg:justify-items-center",
+            "shrink-0",
+            collapsed ? "flex w-full justify-center" : "ml-auto",
           )}
         >
           <SidebarModeMenu mode={sidebar.mode} onSelect={sidebar.setMode} />
@@ -588,22 +595,25 @@ export function CpaDashboard({
         >
           <TabsList
             className={cn(
-              "grid w-full grid-cols-2",
-              collapsed && "lg:grid-cols-1 lg:h-auto",
+              "grid w-full",
+              collapsed ? "lg:grid-cols-1 lg:gap-0.5 lg:p-0.5" : "grid-cols-2",
             )}
           >
             {authViews.map((view) => (
               <TabsTrigger
                 key={view}
                 value={view}
-                className={cn(collapsed && "lg:px-1 lg:text-[11px]")}
+                className={cn(
+                  collapsed &&
+                    "lg:h-8 lg:min-w-0 lg:justify-center lg:px-0 lg:text-[11px]",
+                )}
                 title={authViewLabels[view]}
               >
-                {collapsed ? (
-                  <span className="lg:hidden">{authViewLabels[view]}</span>
-                ) : null}
-                <span className={cn(collapsed && "hidden lg:inline")}>
-                  {collapsed ? authViewLabels[view].slice(0, 1) : authViewLabels[view]}
+                <span className={cn(collapsed && "lg:hidden")}>
+                  {authViewLabels[view]}
+                </span>
+                <span className={cn(!collapsed && "hidden", "lg:inline")}>
+                  {authViewLabels[view].slice(0, 1)}
                 </span>
               </TabsTrigger>
             ))}
@@ -612,26 +622,10 @@ export function CpaDashboard({
       </div>
       <nav className="flex min-h-0 flex-1 flex-col">
         <div className="flex gap-1 overflow-x-auto p-1 lg:flex-col lg:overflow-y-auto">
-          <div
-            className={cn(
-              "px-1.5 pb-0.5 pt-1 text-[10px] font-medium tracking-wide text-muted-foreground/80 uppercase",
-              collapsed && "lg:hidden",
-            )}
-          >
-            {authViewLabels[authView]}
-          </div>
           {visibleAuthNavItems.map((item) => renderNavLink(item, collapsed))}
         </div>
         <div className="mt-auto border-t">
           <div className="flex gap-1 overflow-x-auto p-1 lg:flex-col lg:overflow-visible">
-            <div
-              className={cn(
-                "px-1.5 pb-0.5 pt-1 text-[10px] font-medium tracking-wide text-muted-foreground/80 uppercase",
-                collapsed && "lg:hidden",
-              )}
-            >
-              公共
-            </div>
             {sharedNavItems.map((item) => renderNavLink(item, collapsed))}
           </div>
         </div>
