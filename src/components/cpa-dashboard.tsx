@@ -68,7 +68,6 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { DataBoardSection } from "@/components/data-board-section";
 import { MessagePushSection } from "@/components/message-push-section";
@@ -584,41 +583,39 @@ export function CpaDashboard({
           <SidebarModeMenu mode={sidebar.mode} onSelect={sidebar.setMode} />
         </div>
       </div>
-      <div className={cn("border-b p-1", collapsed && "lg:px-1")}>
-        <Tabs
-          value={authView}
-          onValueChange={(value) => {
-            if (isAuthView(value)) {
-              switchAuthView(value);
-            }
-          }}
+      <div className={cn("border-b p-1", collapsed && "px-1")}>
+        <div
+          className={cn(
+            "rounded-lg bg-muted p-0.5",
+            collapsed
+              ? "mx-auto flex w-9 flex-col items-center gap-0.5"
+              : "grid w-full grid-cols-2 gap-0.5",
+          )}
         >
-          <TabsList
-            className={cn(
-              "grid w-full",
-              collapsed ? "lg:grid-cols-1 lg:gap-0.5 lg:p-0.5" : "grid-cols-2",
-            )}
-          >
-            {authViews.map((view) => (
-              <TabsTrigger
+          {authViews.map((view) => {
+            const selected = authView === view;
+            return (
+              <button
                 key={view}
-                value={view}
-                className={cn(
-                  collapsed &&
-                    "lg:h-8 lg:min-w-0 lg:justify-center lg:px-0 lg:text-[11px]",
-                )}
+                type="button"
                 title={authViewLabels[view]}
+                aria-pressed={selected}
+                onClick={() => switchAuthView(view)}
+                className={cn(
+                  "inline-flex items-center justify-center rounded-md text-[12.5px] font-medium transition-colors",
+                  collapsed ? "h-8 w-8 text-[11px]" : "h-7 px-1.5",
+                  selected
+                    ? "bg-background text-foreground shadow-sm"
+                    : "text-muted-foreground hover:text-foreground",
+                )}
               >
-                <span className={cn(collapsed && "lg:hidden")}>
-                  {authViewLabels[view]}
-                </span>
-                <span className={cn(!collapsed && "hidden", "lg:inline")}>
-                  {authViewLabels[view].slice(0, 1)}
-                </span>
-              </TabsTrigger>
-            ))}
-          </TabsList>
-        </Tabs>
+                {collapsed
+                  ? authViewLabels[view].slice(0, 1)
+                  : authViewLabels[view]}
+              </button>
+            );
+          })}
+        </div>
       </div>
       <nav className="flex min-h-0 flex-1 flex-col">
         <div className="flex gap-1 overflow-x-auto p-1 lg:flex-col lg:overflow-y-auto">
