@@ -421,6 +421,7 @@ const defaultJobRunsPagination: JobRunsPagination = {
   totalPages: 1,
 };
 const syncJobKey = "sync-cpa-instances";
+const hideEmptyCpaStorageKey = "cpa-nexus-hide-empty-cpa";
 const scheduledSyncPollIntervalMs = 2000;
 const scheduledSyncTimeoutMs = 10 * 60 * 1000;
 const authExchangeQuickSelectCounts = [10, 20, 50, 100] as const;
@@ -434,6 +435,7 @@ export function CpaDashboard({
   const activeSection = clientSection;
   const [authView, setAuthView] = useState<AuthView>(defaultAuthView);
   const [authViewReady, setAuthViewReady] = useState(false);
+  const [hideEmptyCpa, setHideEmptyCpa] = useState(false);
   const [instances, setInstances] = useState<CpaInstance[]>([]);
   const [authGroups, setAuthGroups] = useState<
     Array<{ instance: CpaInstance; authFiles: AuthFile[] }>
@@ -661,6 +663,25 @@ export function CpaDashboard({
       // ignore storage failures
     }
   }, [authView, authViewReady]);
+
+  useEffect(() => {
+    try {
+      setHideEmptyCpa(
+        window.localStorage.getItem(hideEmptyCpaStorageKey) === "1",
+      );
+    } catch {
+      // ignore storage failures
+    }
+  }, []);
+
+  function toggleHideEmptyCpa(next: boolean) {
+    setHideEmptyCpa(next);
+    try {
+      window.localStorage.setItem(hideEmptyCpaStorageKey, next ? "1" : "0");
+    } catch {
+      // ignore storage failures
+    }
+  }
 
   useEffect(() => {
     if (!authViewReady) {
@@ -1951,8 +1972,18 @@ export function CpaDashboard({
 
         <main className="min-w-0">
           <header className="flex min-h-14 flex-col justify-center gap-2 border-b bg-background/80 px-3 py-2.5 md:flex-row md:items-center md:justify-between">
-            <div>
+            <div className="flex items-center gap-3">
               <h1 className="text-xl font-semibold">{activeLabel}</h1>
+              {activeSection === "auth" ? (
+                <label className="flex cursor-pointer items-center gap-1.5 text-xs font-normal text-muted-foreground">
+                  <Switch
+                    size="sm"
+                    checked={hideEmptyCpa}
+                    onCheckedChange={toggleHideEmptyCpa}
+                  />
+                  隐藏空账号 CPA
+                </label>
+              ) : null}
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <ThemeToggle />
@@ -2007,6 +2038,7 @@ export function CpaDashboard({
                 groups={authGroups}
                 quotaGroups={quotaGroups}
                 subscriptionQuotas={subscriptionQuotas}
+                hideEmptyCpa={hideEmptyCpa}
                 proxies={proxies}
                 updatingCpaIds={effectiveUpdatingCpaIds}
                 syncingCpaIds={effectiveSyncingCpaIds}
@@ -2037,6 +2069,7 @@ export function CpaDashboard({
               <ProviderAuthFilesSection
                 groups={authGroups}
                 quotaGroups={quotaGroups}
+                hideEmptyCpa={hideEmptyCpa}
                 updatingCpaIds={effectiveUpdatingCpaIds}
                 syncingCpaIds={effectiveSyncingCpaIds}
                 syncingCpaPhases={effectiveSyncingCpaPhases}
@@ -2053,6 +2086,7 @@ export function CpaDashboard({
               <ProviderAuthFilesSection
                 groups={authGroups}
                 quotaGroups={quotaGroups}
+                hideEmptyCpa={hideEmptyCpa}
                 updatingCpaIds={effectiveUpdatingCpaIds}
                 syncingCpaIds={effectiveSyncingCpaIds}
                 syncingCpaPhases={effectiveSyncingCpaPhases}
@@ -2407,6 +2441,7 @@ type SessionJsonDialogState = {
 function ProviderAuthFilesSection({
   groups,
   quotaGroups,
+  hideEmptyCpa,
   updatingCpaIds,
   syncingCpaIds,
   syncingCpaPhases,
@@ -2419,6 +2454,7 @@ function ProviderAuthFilesSection({
 }: {
   groups: Array<{ instance: CpaInstance; authFiles: AuthFile[] }>;
   quotaGroups: Array<{ instance: CpaInstance; quotas: QuotaSnapshot[] }>;
+  hideEmptyCpa: boolean;
   updatingCpaIds: Set<number>;
   syncingCpaIds: Set<number>;
   syncingCpaPhases: Map<number, CpaBusyPhase>;
@@ -2429,7 +2465,9 @@ function ProviderAuthFilesSection({
   emptyLabel: string;
   formatAccountType: (value: string | null) => string;
 }) {
-  const enabledGroups = onlyEnabledCpaGroups(groups);
+  const enabledGroups = onlyEnabledCpaGroups(groups).filter(
+    (group) => !hideEmptyCpa || group.authFiles.length > 0,
+  );
   const [useDesktopMasonry, setUseDesktopMasonry] = useState(false);
 
   useEffect(() => {
@@ -2838,6 +2876,7 @@ function AuthFilesSection({
   groups,
   quotaGroups,
   subscriptionQuotas,
+  hideEmptyCpa,
   proxies,
   updatingCpaIds,
   syncingCpaIds,
@@ -2865,6 +2904,7 @@ function AuthFilesSection({
   groups: Array<{ instance: CpaInstance; authFiles: AuthFile[] }>;
   quotaGroups: Array<{ instance: CpaInstance; quotas: QuotaSnapshot[] }>;
   subscriptionQuotas: SubscriptionQuotaSetting[];
+  hideEmptyCpa: boolean;
   proxies: ProxyRow[];
   updatingCpaIds: Set<number>;
   syncingCpaIds: Set<number>;
@@ -2927,6 +2967,9 @@ function AuthFilesSection({
   ) => Promise<void>;
 }) {
   const enabledGroups = onlyEnabledCpaGroups(groups);
+  const visibleGroups = enabledGroups.filter(
+    (group) => !hideEmptyCpa || group.authFiles.length > 0,
+  );
   const enabledInstances = enabledGroups.map((group) => group.instance);
   const proxyNameByUrl = useMemo(
     () => new Map(proxies.map((proxy) => [proxy.url, proxy.name])),
@@ -3756,9 +3799,9 @@ function AuthFilesSection({
   }
 
   const groupColumns =
-    useDesktopMasonry && enabledGroups.length > 1
-      ? distributeCpaGroups(enabledGroups)
-      : [enabledGroups];
+    useDesktopMasonry && visibleGroups.length > 1
+      ? distributeCpaGroups(visibleGroups)
+      : [visibleGroups];
   const exchangeMoveOptions = exchangeDialog
     ? enabledInstances.filter(
         (instance) => instance.id !== exchangeDialog.instance.id,
