@@ -12,6 +12,16 @@ import {
   xaiBillingWeeklyUrl,
   type XaiBillingSummary,
 } from "./xai-quota";
+import {
+  buildClaudeRequestHeaders,
+  buildClaudeUsageSummary,
+  claudeProfileUrl,
+  claudeUsageToQuotaPercents,
+  claudeUsageUrl,
+  parseClaudeProfilePayload,
+  parseClaudeUsagePayload,
+  resolveClaudePlanLabel,
+} from "./claude-quota";
 
 export type CpaConnection = Pick<
   CpaInstance,
@@ -227,6 +237,32 @@ export async function refreshRemoteXaiQuotas(
   return batches.flat();
 }
 
+export async function refreshRemoteClaudeQuotas(
+  instance: CpaConnection,
+  remoteAuthFiles?: RemoteAuthFile[],
+): Promise<NormalizedQuotaSnapshot[]> {
+  const files = remoteAuthFiles ?? (await listRemoteAuthFiles(instance));
+  const claudeFiles = files.filter((file) =>
+    matchesAuthView(
+      stringOrNull(file.provider) ?? stringOrNull(file.type),
+      "claude",
+      { treatMissingAsCodex: false },
+    ),
+  );
+
+  const batches: NormalizedQuotaSnapshot[][] = [];
+  for (let index = 0; index < claudeFiles.length; index += quotaProbeConcurrency) {
+    const batch = claudeFiles.slice(index, index + quotaProbeConcurrency);
+    batches.push(
+      ...(await Promise.all(
+        batch.map((file) => probeClaudeUsage(instance, file)),
+      )),
+    );
+  }
+
+  return batches.flat();
+}
+
 async function refreshCodexWhamQuotas(
   instance: CpaConnection,
   remoteAuthFiles: RemoteAuthFile[],
@@ -425,6 +461,101 @@ async function requestXaiBilling(
       ? (payload as Record<string, unknown>)
       : null;
   return buildXaiBillingSummary(config);
+}
+
+async function probeClaudeUsage(
+  instance: CpaConnection,
+  authFile: RemoteAuthFile,
+): Promise<NormalizedQuotaSnapshot[]> {
+  const authIndex = stringOrNull(authFile.auth_index);
+  if (!authIndex) {
+    return [
+      quotaProbeFailure(authFile, "Claude 账号缺少 auth_index，无法查询额度", null),
+    ];
+  }
+
+  try {
+    const header = buildClaudeRequestHeaders();
+    const [usageResult, profileResult] = await Promise.allSettled([
+      requestClaude(instance, authIndex, claudeUsageUrl, header),
+      requestClaude(instance, authIndex, claudeProfileUrl, header),
+    ]);
+
+    if (usageResult.status === "rejected") {
+      throw usageResult.reason;
+    }
+
+    const summary = buildClaudeUsageSummary(
+      parseClaudeUsagePayload(usageResult.value),
+    );
+    if (!summary) {
+      return [
+        quotaProbeFailure(authFile, "Claude usage 未返回可用额度数据", usageResult.value),
+      ];
+    }
+
+    const planLabel =
+      profileResult.status === "fulfilled"
+        ? resolveClaudePlanLabel(parseClaudeProfilePayload(profileResult.value))
+        : null;
+    const percents = claudeUsageToQuotaPercents(summary);
+    return [
+      {
+        email: stringOrNull(authFile.email),
+        authFileName: stringOrNull(authFile.name),
+        usage5hPercent: percents.usage5hPercent,
+        usageWeekPercent: percents.usageWeekPercent,
+        available: percents.available,
+        exception: percents.available ? null : "额度已用尽",
+        raw: {
+          provider: "claude",
+          plan: planLabel,
+          usage: summary,
+        },
+      },
+    ];
+  } catch (error) {
+    return [
+      quotaProbeFailure(
+        authFile,
+        error instanceof Error ? error.message : String(error),
+        null,
+      ),
+    ];
+  }
+}
+
+async function requestClaude(
+  instance: CpaConnection,
+  authIndex: string,
+  url: string,
+  header: Record<string, string>,
+): Promise<unknown> {
+  const response = await cpaFetchJson<{
+    status_code?: number;
+    body?: string;
+  }>(instance, "/v0/management/api-call", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      auth_index: authIndex,
+      method: "GET",
+      url,
+      header,
+    }),
+  });
+
+  const upstreamStatus = response.status_code ?? 0;
+  const body = parseJson(response.body ?? "");
+  if (upstreamStatus < 200 || upstreamStatus >= 300) {
+    throw new Error(
+      `Claude usage ${upstreamStatus || "error"}: ${extractErrorMessage(body)}`,
+    );
+  }
+
+  return body;
 }
 
 async function cpaFetchJson<T = unknown>(

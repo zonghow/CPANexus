@@ -589,7 +589,7 @@ export function CpaDashboard({
             "rounded-lg bg-muted p-0.5",
             collapsed
               ? "mx-auto flex w-9 flex-col items-center gap-0.5"
-              : "grid w-full grid-cols-2 gap-0.5",
+              : "grid w-full grid-cols-3 gap-0.5",
           )}
         >
           {authViews.map((view) => {
@@ -2034,7 +2034,7 @@ export function CpaDashboard({
             ) : null}
 
             {activeSection === "auth" && authView === "grok" ? (
-              <GrokAuthFilesSection
+              <ProviderAuthFilesSection
                 groups={authGroups}
                 quotaGroups={quotaGroups}
                 updatingCpaIds={effectiveUpdatingCpaIds}
@@ -2042,6 +2042,26 @@ export function CpaDashboard({
                 syncingCpaPhases={effectiveSyncingCpaPhases}
                 nowMs={nowMs}
                 onRefreshCpa={refreshCpaInstance}
+                firstWindowLabel="周"
+                secondWindowLabel="月"
+                emptyLabel="暂无 Grok 账号"
+                formatAccountType={formatGrokAccountType}
+              />
+            ) : null}
+
+            {activeSection === "auth" && authView === "claude" ? (
+              <ProviderAuthFilesSection
+                groups={authGroups}
+                quotaGroups={quotaGroups}
+                updatingCpaIds={effectiveUpdatingCpaIds}
+                syncingCpaIds={effectiveSyncingCpaIds}
+                syncingCpaPhases={effectiveSyncingCpaPhases}
+                nowMs={nowMs}
+                onRefreshCpa={refreshCpaInstance}
+                firstWindowLabel="周"
+                secondWindowLabel="5时"
+                emptyLabel="暂无 Claude 账号"
+                formatAccountType={formatClaudeAccountType}
               />
             ) : null}
 
@@ -2384,7 +2404,7 @@ type SessionJsonDialogState = {
   error: string | null;
 };
 
-function GrokAuthFilesSection({
+function ProviderAuthFilesSection({
   groups,
   quotaGroups,
   updatingCpaIds,
@@ -2392,6 +2412,10 @@ function GrokAuthFilesSection({
   syncingCpaPhases,
   nowMs,
   onRefreshCpa,
+  firstWindowLabel,
+  secondWindowLabel,
+  emptyLabel,
+  formatAccountType,
 }: {
   groups: Array<{ instance: CpaInstance; authFiles: AuthFile[] }>;
   quotaGroups: Array<{ instance: CpaInstance; quotas: QuotaSnapshot[] }>;
@@ -2400,6 +2424,10 @@ function GrokAuthFilesSection({
   syncingCpaPhases: Map<number, CpaBusyPhase>;
   nowMs: number;
   onRefreshCpa: (cpaInstanceId: number) => Promise<void>;
+  firstWindowLabel: string;
+  secondWindowLabel: string;
+  emptyLabel: string;
+  formatAccountType: (value: string | null) => string;
 }) {
   const enabledGroups = onlyEnabledCpaGroups(groups);
   const [useDesktopMasonry, setUseDesktopMasonry] = useState(false);
@@ -2426,7 +2454,7 @@ function GrokAuthFilesSection({
     const quotaGroup = quotaGroups.find(
       (item) => item.instance.id === group.instance.id,
     );
-    const rows = mergeGrokAuthFilesWithQuotas(
+    const rows = mergeProviderAuthFilesWithQuotas(
       group.authFiles,
       quotaGroup?.quotas ?? [],
     );
@@ -2493,8 +2521,14 @@ function GrokAuthFilesSection({
             ) : null}
           </div>
           <div className="flex w-full flex-wrap items-center gap-x-2 gap-y-1 border-t border-border/50 pt-1.5 text-xs text-muted-foreground">
-            <HeaderAverageMeter label="周" value={averageWeekRemaining} />
-            <HeaderAverageMeter label="月" value={averageMonthRemaining} />
+            <HeaderAverageMeter
+              label={firstWindowLabel}
+              value={averageWeekRemaining}
+            />
+            <HeaderAverageMeter
+              label={secondWindowLabel}
+              value={averageMonthRemaining}
+            />
             <span className="text-emerald-700">{availableCount} 可用</span>
             {disabledCount > 0 ? <span>{disabledCount} 停用</span> : null}
             {exceptionCount > 0 ? (
@@ -2502,7 +2536,14 @@ function GrokAuthFilesSection({
             ) : null}
           </div>
         </div>
-        <GrokAuthFileTable rows={rows} nowMs={nowMs} />
+        <ProviderAuthFileTable
+          rows={rows}
+          nowMs={nowMs}
+          firstWindowLabel={firstWindowLabel}
+          secondWindowLabel={secondWindowLabel}
+          emptyLabel={emptyLabel}
+          formatAccountType={formatAccountType}
+        />
         {isUpdating ? (
           <div className="absolute inset-0 z-40 flex items-center justify-center bg-background/70 backdrop-blur-[1px]">
             <div className="flex items-center gap-2 rounded-md border bg-card px-3 py-2 text-sm font-medium shadow-sm">
@@ -2540,7 +2581,7 @@ function GrokAuthFilesSection({
   );
 }
 
-type GrokAuthFileRow = {
+type ProviderAuthFileRow = {
   id: number;
   email: string | null;
   fileName: string;
@@ -2558,10 +2599,10 @@ type GrokAuthFileRow = {
   refreshedAt: string;
 };
 
-function mergeGrokAuthFilesWithQuotas(
+function mergeProviderAuthFilesWithQuotas(
   authFileRows: AuthFile[],
   quotas: QuotaSnapshot[],
-): GrokAuthFileRow[] {
+): ProviderAuthFileRow[] {
   const quotaByFileName = new Map<string, QuotaSnapshot>();
   for (const quota of quotas) {
     if (quota.authFileName) {
@@ -2613,12 +2654,20 @@ function mergeGrokAuthFilesWithQuotas(
   });
 }
 
-function GrokAuthFileTable({
+function ProviderAuthFileTable({
   rows,
   nowMs,
+  firstWindowLabel,
+  secondWindowLabel,
+  emptyLabel,
+  formatAccountType,
 }: {
-  rows: GrokAuthFileRow[];
+  rows: ProviderAuthFileRow[];
   nowMs: number;
+  firstWindowLabel: string;
+  secondWindowLabel: string;
+  emptyLabel: string;
+  formatAccountType: (value: string | null) => string;
 }) {
   return (
     <div className="overflow-x-auto">
@@ -2638,10 +2687,10 @@ function GrokAuthFileTable({
                 账号
               </TableHead>
               <TableHead className="sticky top-0 z-10 w-24 bg-card px-2 py-1 text-xs shadow-[0_1px_0_var(--border)]">
-                <CompactPercentHeader windowLabel="周" />
+                <CompactPercentHeader windowLabel={firstWindowLabel} />
               </TableHead>
               <TableHead className="sticky top-0 z-10 w-24 bg-card px-2 py-1 text-xs shadow-[0_1px_0_var(--border)]">
-                <CompactPercentHeader windowLabel="月" />
+                <CompactPercentHeader windowLabel={secondWindowLabel} />
               </TableHead>
               <TableHead className="sticky top-0 z-10 w-20 bg-card px-2 py-1 text-xs shadow-[0_1px_0_var(--border)]">
                 类型
@@ -2661,7 +2710,7 @@ function GrokAuthFileTable({
                   colSpan={6}
                   className="h-16 text-center text-sm text-muted-foreground"
                 >
-                  暂无 Grok 账号
+                  {emptyLabel}
                 </TableCell>
               </TableRow>
             ) : (
@@ -2716,7 +2765,7 @@ function GrokAuthFileTable({
                   </TableCell>
                   <TableCell className="px-2 py-1">
                     <span className="block truncate text-xs text-muted-foreground">
-                      {formatGrokAccountType(row.accountType)}
+                      {formatAccountType(row.accountType)}
                     </span>
                   </TableCell>
                   <TableCell className="px-2 py-1">
@@ -2760,6 +2809,27 @@ function formatGrokAccountType(value: string | null) {
   }
   if (normalized === "xai" || normalized === "grok") {
     return "Grok";
+  }
+  return value;
+}
+
+function formatClaudeAccountType(value: string | null) {
+  if (!value) {
+    return "-";
+  }
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "oauth") {
+    return "OAuth";
+  }
+  if (normalized === "api_key" || normalized === "apikey") {
+    return "API Key";
+  }
+  if (
+    normalized === "claude" ||
+    normalized === "anthropic" ||
+    normalized === "claude-code"
+  ) {
+    return "Claude";
   }
   return value;
 }

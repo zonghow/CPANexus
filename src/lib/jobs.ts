@@ -20,6 +20,7 @@ import { buildDashboardMetricSnapshot } from "./data-board";
 import {
   downloadRemoteAuthFile,
   listRemoteAuthFiles,
+  refreshRemoteClaudeQuotas,
   refreshRemoteQuotas,
   refreshRemoteXaiQuotas,
   type RemoteAuthFile,
@@ -190,12 +191,18 @@ async function performCpaInstanceSync(
     updateCpaInstanceSyncRunPhase(syncRunId, "auth_payloads", "补全认证文件中");
     const payloadResult = await syncAuthFilePayloadsForInstance(instance, remoteFiles);
     updateCpaInstanceSyncRunPhase(syncRunId, "quotas", "刷新配额中");
-    applyGrokAuthAvailabilityFromRemote(instance.id, remoteFiles);
+    applyRemoteAuthAvailabilityFromRemote(instance.id, remoteFiles, "grok");
+    applyRemoteAuthAvailabilityFromRemote(instance.id, remoteFiles, "claude");
     const codexRemoteFiles = remoteFiles.filter((file) =>
       matchesAuthView(remoteAuthProvider(file), "codex"),
     );
     const grokRemoteFiles = remoteFiles.filter((file) =>
       matchesAuthView(remoteAuthProvider(file), "grok", {
+        treatMissingAsCodex: false,
+      }),
+    );
+    const claudeRemoteFiles = remoteFiles.filter((file) =>
+      matchesAuthView(remoteAuthProvider(file), "claude", {
         treatMissingAsCodex: false,
       }),
     );
@@ -209,7 +216,12 @@ async function performCpaInstanceSync(
       grokRemoteFiles,
       "grok",
     );
-    const quotaResult = codexQuotaResult + grokQuotaResult;
+    const claudeQuotaResult = await syncQuotasForInstance(
+      instance,
+      claudeRemoteFiles,
+      "claude",
+    );
+    const quotaResult = codexQuotaResult + grokQuotaResult + claudeQuotaResult;
     recordDashboardMetricSnapshot(instance.id, nowIso());
     await evaluateMessagePushPoliciesForCpa(instance.id);
 
@@ -268,12 +280,15 @@ export async function refreshAuthFileQuotaById(authFileId: number): Promise<CpaI
     const isGrok = matchesAuthView(authFile.provider, "grok", {
       treatMissingAsCodex: false,
     });
-    const snapshots = matchingQuotaSnapshots(
-      authFile,
-      isGrok
-        ? await refreshRemoteXaiQuotas(instance, [remoteFile])
-        : await refreshRemoteQuotas(instance, [remoteFile]),
-    );
+    const isClaude = matchesAuthView(authFile.provider, "claude", {
+      treatMissingAsCodex: false,
+    });
+    const refreshedSnapshots = isGrok
+      ? await refreshRemoteXaiQuotas(instance, [remoteFile])
+      : isClaude
+        ? await refreshRemoteClaudeQuotas(instance, [remoteFile])
+        : await refreshRemoteQuotas(instance, [remoteFile]);
+    const snapshots = matchingQuotaSnapshots(authFile, refreshedSnapshots);
     const capturedAt = nowIso();
 
     const previousUsage = loadPreviousUsageByAccount(
@@ -637,21 +652,23 @@ function carryForwardUsage(
 async function syncQuotasForInstance(
   instance: CpaInstance,
   remoteFiles: RemoteAuthFile[] = [],
-  view: "codex" | "grok" = "codex",
+  view: "codex" | "grok" | "claude" = "codex",
 ) {
   const scopedRemoteFiles = remoteFiles.filter((file) =>
     matchesAuthView(remoteAuthProvider(file), view, {
       treatMissingAsCodex: view === "codex",
     }),
   );
-  if (scopedRemoteFiles.length === 0 && view === "grok") {
+  if (scopedRemoteFiles.length === 0 && view !== "codex") {
     return 0;
   }
 
   const snapshots =
     view === "grok"
       ? await refreshRemoteXaiQuotas(instance, scopedRemoteFiles)
-      : await refreshRemoteQuotas(instance, scopedRemoteFiles);
+      : view === "claude"
+        ? await refreshRemoteClaudeQuotas(instance, scopedRemoteFiles)
+        : await refreshRemoteQuotas(instance, scopedRemoteFiles);
   const capturedAt = nowIso();
 
   const previousUsage = loadPreviousUsageByAccount(
@@ -757,13 +774,18 @@ function deleteQuotaSnapshotsForIdentity(
   }
 }
 
-function applyGrokAuthAvailabilityFromRemote(
+function applyRemoteAuthAvailabilityFromRemote(
   cpaInstanceId: number,
   remoteFiles: RemoteAuthFile[],
+  view: "grok" | "claude",
 ) {
   const syncedAt = nowIso();
   for (const remoteFile of remoteFiles) {
-    if (!matchesAuthView(remoteAuthProvider(remoteFile), "grok")) {
+    if (
+      !matchesAuthView(remoteAuthProvider(remoteFile), view, {
+        treatMissingAsCodex: false,
+      })
+    ) {
       continue;
     }
     const fileName = remoteFile.name?.trim();

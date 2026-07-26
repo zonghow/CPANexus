@@ -1,4 +1,4 @@
-export const authViews = ["codex", "grok"] as const;
+export const authViews = ["codex", "grok", "claude"] as const;
 
 export type AuthView = (typeof authViews)[number];
 
@@ -9,6 +9,7 @@ export const authViewStorageKey = "cpa-nexus-auth-view";
 export const authViewLabels: Record<AuthView, string> = {
   codex: "Codex",
   grok: "Grok",
+  claude: "Claude",
 };
 
 /** Sections that only exist for Codex auth workflows. */
@@ -27,6 +28,7 @@ export const sharedSections = ["instances", "proxies", "jobs"] as const;
 
 const codexProviderAliases = new Set(["codex", "openai", "chatgpt"]);
 const grokProviderAliases = new Set(["xai", "grok", "x-ai", "x.ai"]);
+const claudeProviderAliases = new Set(["claude", "anthropic", "claude-code"]);
 
 export function isAuthView(value: unknown): value is AuthView {
   return typeof value === "string" && authViews.includes(value as AuthView);
@@ -50,6 +52,9 @@ export function resolveAuthView(provider: unknown): AuthView | null {
   }
   if (grokProviderAliases.has(normalized)) {
     return "grok";
+  }
+  if (claudeProviderAliases.has(normalized)) {
+    return "claude";
   }
   return null;
 }
@@ -75,8 +80,8 @@ export function isCodexOnlySection(section: string): section is CodexOnlySection
   return (codexOnlySections as readonly string[]).includes(section);
 }
 
-export function defaultSectionForAuthView(view: AuthView): string {
-  return view === "grok" ? "auth" : "auth";
+export function defaultSectionForAuthView(_view: AuthView): string {
+  return "auth";
 }
 
 export function sectionAllowedForAuthView(

@@ -8,12 +8,14 @@ import {
 } from "./auth-provider";
 
 describe("auth-provider", () => {
-  it("resolves codex and grok provider aliases", () => {
+  it("resolves codex, grok and claude provider aliases", () => {
     expect(resolveAuthView("codex")).toBe("codex");
     expect(resolveAuthView("openai")).toBe("codex");
     expect(resolveAuthView("xai")).toBe("grok");
     expect(resolveAuthView("grok")).toBe("grok");
-    expect(resolveAuthView("claude")).toBeNull();
+    expect(resolveAuthView("claude")).toBe("claude");
+    expect(resolveAuthView("anthropic")).toBe("claude");
+    expect(resolveAuthView("unknown")).toBeNull();
   });
 
   it("treats missing provider as codex when matching", () => {
@@ -32,6 +34,15 @@ describe("auth-provider", () => {
     expect(sectionAllowedForAuthView("jobs", "grok")).toBe(true);
     expect(sectionAllowedForAuthView("dashboard", "grok")).toBe(false);
     expect(sectionAllowedForAuthView("candidate-pool", "grok")).toBe(false);
+  });
+
+  it("restricts claude sections", () => {
+    expect(sectionAllowedForAuthView("auth", "claude")).toBe(true);
+    expect(sectionAllowedForAuthView("instances", "claude")).toBe(true);
+    expect(sectionAllowedForAuthView("proxies", "claude")).toBe(true);
+    expect(sectionAllowedForAuthView("jobs", "claude")).toBe(true);
+    expect(sectionAllowedForAuthView("dashboard", "claude")).toBe(false);
+    expect(sectionAllowedForAuthView("candidate-pool", "claude")).toBe(false);
   });
 
   it("extracts grok account type from payload", () => {
