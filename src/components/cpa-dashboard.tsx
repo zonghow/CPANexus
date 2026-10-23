@@ -2631,6 +2631,8 @@ type ProviderAuthFileRow = {
   statusLabel: string;
   usageWeekPercent: number | null;
   usage5hPercent: number | null;
+  usageWeekResetAt: string | null;
+  usage5hResetAt: string | null;
   usageWeekStale: boolean;
   usage5hStale: boolean;
   proxyUrl: string | null;
@@ -2684,6 +2686,8 @@ function mergeProviderAuthFilesWithQuotas(
       statusLabel,
       usageWeekPercent: quota?.usageWeekPercent ?? null,
       usage5hPercent: quota?.usage5hPercent ?? null,
+      usageWeekResetAt: quota?.usageWeekResetAt ?? null,
+      usage5hResetAt: quota?.usage5hResetAt ?? null,
       usageWeekStale: quota?.usageWeekStale ?? false,
       usage5hStale: quota?.usage5hStale ?? false,
       proxyUrl: file.proxyUrl,
@@ -2788,7 +2792,7 @@ function ProviderAuthFileTable({
                   <TableCell className="w-24 px-2 py-1">
                     <CompactPercentBar
                       value={row.usageWeekPercent}
-                      resetAt={null}
+                      resetAt={row.usageWeekResetAt}
                       nowMs={nowMs}
                       stale={row.usageWeekStale}
                     />
@@ -2796,7 +2800,7 @@ function ProviderAuthFileTable({
                   <TableCell className="w-24 px-2 py-1">
                     <CompactPercentBar
                       value={row.usage5hPercent}
-                      resetAt={null}
+                      resetAt={row.usage5hResetAt}
                       nowMs={nowMs}
                       stale={row.usage5hStale}
                     />

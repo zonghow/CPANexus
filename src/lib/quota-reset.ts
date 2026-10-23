@@ -57,8 +57,25 @@ export function extractQuotaResetTimes(
   const capturedMs = parseDateMs(capturedAt);
   const result = { ...emptyResetTimes };
 
-  applyDirectWindow(result, obj, "5h", ["usage5hResetAt", "reset5hAt", "fiveHourResetAt", "five_hour_reset_at", "5h_reset_at"], capturedMs);
-  applyDirectWindow(result, obj, "week", ["usageWeekResetAt", "resetWeekAt", "weeklyResetAt", "week_reset_at", "weekly_reset_at"], capturedMs);
+  for (const source of [obj, recordOrNull(obj.usage)]) {
+    if (!source) {
+      continue;
+    }
+
+    applyDirectWindow(result, source, "5h", ["usage5hResetAt", "reset5hAt", "fiveHourResetAt", "fiveHourResetsAt", "five_hour_reset_at", "5h_reset_at"], capturedMs);
+    applyDirectWindow(result, source, "week", ["usageWeekResetAt", "resetWeekAt", "weeklyResetAt", "sevenDayResetsAt", "week_reset_at", "weekly_reset_at"], capturedMs);
+  }
+
+  const xaiBilling = obj.provider === "xai" ? recordOrNull(obj.billing) : null;
+  if (xaiBilling) {
+    // Grok keeps its monthly window in the 5h slot.
+    if (numberOrNull(xaiBilling.usagePercent) !== null) {
+      applyDirectWindow(result, xaiBilling, "week", ["periodEnd"], capturedMs);
+    }
+    if (numberOrNull(xaiBilling.usedPercent) !== null) {
+      applyDirectWindow(result, xaiBilling, "5h", ["billingPeriodEnd"], capturedMs);
+    }
+  }
 
   for (const container of [obj, recordOrNull(obj.quota)]) {
     if (!container) {
