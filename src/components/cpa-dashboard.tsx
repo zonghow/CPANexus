@@ -13,6 +13,8 @@ import {
   Database,
   Download,
   ExternalLink,
+  Eye,
+  EyeOff,
   FileKey2,
   Info,
   ListChecks,
@@ -2292,8 +2294,7 @@ function InstancesSection(props: {
               />
             </Field>
             <Field label="CPA密码">
-              <Input
-                type="password"
+              <PasswordInput
                 value={props.form.password}
                 onChange={(event) =>
                   props.setForm({ ...props.form, password: event.target.value })
@@ -8483,6 +8484,39 @@ function NumberField({
         onChange={(event) => onChange(Number(event.target.value))}
       />
     </Field>
+  );
+}
+
+function PasswordInput({
+  className,
+  ...props
+}: Omit<React.ComponentProps<"input">, "type">) {
+  const [visible, setVisible] = useState(false);
+  const toggleLabel = visible ? "隐藏密码" : "显示密码";
+
+  return (
+    <div className="relative">
+      <Input
+        {...props}
+        type={visible ? "text" : "password"}
+        className={cn("pr-9 [&::-ms-reveal]:hidden", className)}
+      />
+      <Button
+        type="button"
+        size="icon-xs"
+        variant="ghost"
+        className="absolute top-1 right-1 text-muted-foreground"
+        aria-label={toggleLabel}
+        title={toggleLabel}
+        onClick={() => setVisible((current) => !current)}
+      >
+        {visible ? (
+          <EyeOff className="size-3.5" />
+        ) : (
+          <Eye className="size-3.5" />
+        )}
+      </Button>
+    </div>
   );
 }
 
